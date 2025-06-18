@@ -48,6 +48,9 @@ packages:
 #- aeson-2.2.3.0@sha256:7d48c2395ef168d2c2070fdb02c7998384be27d31a03bb35d1740af4a19a857b,6368
 #- hvega-0.12.0.7@sha256:c53272ed98f6c1926d8202cc1b0e13c6778c613718fcd1950f8accd4d9c1dc13,11152
 
+extra-deps:
+- streamly-0.10.1@sha256:c0cdf0c1e57d8011bd585a0e571b3f92fb10f31458cdc8d466128c24b18af74a,20978
+
 # Override default flag values for project packages and extra-deps
 # flags: {}
 
