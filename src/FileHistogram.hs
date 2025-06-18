@@ -8,6 +8,7 @@ import System.FilePath
 import Control.Monad
 import Data.Aeson
 import qualified Data.Text as T
+import qualified Data.Text.Lazy as TL
 import System.IO
 
 -- | Get all file sizes recursively from a directory
@@ -36,39 +37,33 @@ getFileSizes path = do
 -- | Create histogram specification using hvega
 createHistogram :: [Integer] -> VegaLite
 createHistogram sizes = 
-    let fileSizeData = dataFromJson $ toJSON $ map (\size -> object ["size" .= size]) sizes
+    let fileSizeData = dataFromJson (toJSON $ map (\size -> object ["size" .= size]) sizes) []
         
         enc = encoding
             . position X [ PName "size"
                         , PmType Quantitative
                         , PTitle "File Size (bytes)"
                         , PScale [SType ScLog]  -- Log scale for better visualization of wide range
+                        , PBin [MaxBins 30]
                         ]
             . position Y [ PAggregate Count
                         , PmType Quantitative
                         , PTitle "Number of Files"
                         ]
-        
-        spec = mark Bar [MBinned True]
-            . enc
-            . resolve
-                . resolution (RScale [(ChX, Independent)])
     
     in toVegaLite 
         [ title "File Size Distribution" []
         , width 600
         , height 400
         , fileSizeData
-        , transform 
-            . binAs [Step 0.5] "size" "binned_size"  -- Auto binning with step size
-        $ []
-        , spec []
+        , mark Bar []
+        , enc []
         ]
 
 -- | Alternative histogram with linear scale and auto binning
 createLinearHistogram :: [Integer] -> VegaLite
 createLinearHistogram sizes = 
-    let fileSizeData = dataFromJson $ toJSON $ map (\size -> object ["size" .= size]) sizes
+    let fileSizeData = dataFromJson (toJSON $ map (\size -> object ["size" .= size]) sizes) []
         
         enc = encoding
             . position X [ PName "size"
@@ -80,25 +75,23 @@ createLinearHistogram sizes =
                         , PmType Quantitative
                         , PTitle "Number of Files"
                         ]
-        
-        spec = mark Bar []
-            . enc
     
     in toVegaLite 
         [ title "File Size Distribution (Linear Scale)" []
         , width 600
         , height 400
         , fileSizeData
-        , spec []
+        , mark Bar []
+        , enc []
         ]
 
 -- | Create histogram with human-readable file sizes
 createReadableHistogram :: [Integer] -> VegaLite
 createReadableHistogram sizes = 
-    let fileSizeData = dataFromJson $ toJSON $ map (\size -> 
+    let fileSizeData = dataFromJson (toJSON $ map (\size -> 
             let readable = formatFileSize size
             in object ["size" .= size, "readable_size" .= readable]
-            ) sizes
+            ) sizes) []
         
         enc = encoding
             . position X [ PName "size"
@@ -112,18 +105,15 @@ createReadableHistogram sizes =
                         , PTitle "Number of Files"
                         ]
             . color [MString "#4682B4"]
-        
-        spec = mark Bar [MTooltip TTEncoding]
-            . enc
-            . selection
-                . select "brush" Interval [BindScales]
     
     in toVegaLite 
         [ title "File Size Distribution" []
         , width 700
         , height 450
         , fileSizeData
-        , spec []
+        , mark Bar [MTooltip TTEncoding]
+        , enc []
+        , selection . select "brush" Interval [BindScales] $ []
         ]
 
 -- | Format file size in human-readable format
@@ -149,7 +139,7 @@ generateHistogram inputPath outputPath = do
             let histogram = createReadableHistogram sizes
             
             -- Save to HTML file
-            writeFile outputPath $ toHtml histogram
+            writeFile outputPath $ TL.unpack $ toHtml histogram
             putStrLn $ "Histogram saved to: " ++ outputPath
 
 -- | Example usage
@@ -159,4 +149,3 @@ main = do
     path <- getLine
     let outputFile = "file_size_histogram.html"
     generateHistogram path outputFile
-    
