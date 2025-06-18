@@ -1,61 +1,30 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE CPP #-}
 
 module FileHistogram 
-    ( getFileSizes
-    , createHistogram
+    ( createHistogram
     , formatFileSize
     , generateHistogram
     , fileHistogramCli
     , main
     ) where
 
+import qualified Data.Text.Lazy as TL
 import qualified Graphics.Vega.VegaLite as VL
 import Graphics.Vega.VegaLite (VegaLite)
-import System.Directory
-import System.FilePath
+import System.Info (os)
 import System.Environment
 import System.Process
 import System.Exit
-import Control.Monad
-import Data.Aeson
-import qualified Data.Text as T
-import qualified Data.Text.Lazy as TL
-
--- | Create histogram with logarithmic scaling for both axes
-createHistogramNotWorking :: [Integer] -> VegaLite
-createHistogramNotWorking sizes =
-    let         -- Filter out zero-byte files for log scale
-        nonZeroSizes = filter (> 0) sizes
-        fileSizeData = VL.dataFromJson (toJSON $ map (\fileSize -> object ["size" .= fileSize]) nonZeroSizes) []
-
-        enc = VL.encoding
-            . VL.position VL.X [ VL.PName "size"
-                        , VL.PmType VL.Quantitative
-                        , VL.PTitle "File Size (bytes, log scale)"
-                        , VL.PScale [VL.SType VL.ScLog]  -- Logarithmic scale
-                        , VL.PBin [VL.MaxBins 25]
-                        ]
-            . VL.position VL.Y [ VL.PAggregate VL.Count
-                        , VL.PmType VL.Quantitative
-                        , VL.PTitle "Number of Files"
-                        ]
-            . VL.color [VL.MString "#4682B4"]
-
-    in VL.toVegaLite
-        [ VL.title (T.pack $ "File Size Distribution (" ++ show (length nonZeroSizes) ++ " files with size > 0)") []
-        , VL.width 700
-        , VL.height 450
-        , fileSizeData
-        , VL.mark VL.Bar [VL.MTooltip VL.TTEncoding]
-        , enc []
-        ]
+import FileScanner
+import Logging
 
 -- | Create histogram with logarithmic transformation and proper file size formatting
 createHistogram :: [Integer] -> VegaLite
 createHistogram allSizes =
     -- Filter out zero-byte files and transform to log
     let sizes = filter (> 0) allSizes
-        logSizes = map (logBase 10 . fromInteger) sizes
+        logSizes = map (\x -> logBase 10 (fromInteger x)) sizes
         fileSizeData = VL.dataFromColumns []
             . VL.dataColumn "log_size" (VL.Numbers logSizes)
             . VL.dataColumn "size" (VL.Numbers $ map fromInteger sizes)
@@ -85,29 +54,6 @@ createHistogram allSizes =
         , enc []
         ]
 
--- | Get all file sizes recursively from a directory
-getFileSizes :: FilePath -> IO [Integer]
-getFileSizes path = do
-    exists <- doesDirectoryExist path
-    if exists
-        then do
-            contents <- listDirectory path
-            sizes <- forM contents $ \item -> do
-                let fullPath = path </> item
-                isFile <- doesFileExist fullPath
-                isDir <- doesDirectoryExist fullPath
-                if isFile
-                    then do
-                        fileSize <- getFileSize fullPath
-                        return [fileSize]
-                    else if isDir
-                        then getFileSizes fullPath
-                        else return []
-            return $ concat sizes
-        else do
-            putStrLn $ "Directory does not exist: " ++ path
-            return []
-
 -- | Format file size in human-readable format
 formatFileSize :: Integer -> String
 formatFileSize bytes
@@ -119,37 +65,61 @@ formatFileSize bytes
 -- | Main function to generate and save histogram
 generateHistogram :: FilePath -> FilePath -> IO ()
 generateHistogram inputPath outputPath = do
-    putStrLn $ "Scanning files in: " ++ inputPath
-    sizes <- getFileSizes inputPath
+    logInfo $ "Scanning files in: " ++ inputPath
+    
+    let scanOpts = defaultScanOptions 
+            { followSymlinks = False
+            , crossMountBoundaries = False
+            }
+    
+    sizes <- getFileSizes scanOpts inputPath
     
     if null sizes
-        then putStrLn "No files found or directory doesn't exist"
+        then do
+            logWarn "No files found or directory doesn't exist"
         else do
-            putStrLn $ "Found " ++ show (length sizes) ++ " files"
+            logInfo $ "Found " ++ show (length sizes) ++ " files"
             putStrLn $ "Size range: " ++ formatFileSize (minimum sizes) ++ " - " ++ formatFileSize (maximum sizes)
             
             let histogram = createHistogram sizes
             
             -- Save to HTML file
+            logInfo $ "Saving histogram to: " ++ outputPath
             writeFile outputPath $ TL.unpack $ VL.toHtml histogram
             putStrLn $ "Histogram saved to: " ++ outputPath
             
-            -- Open the file with xdg-open
-            putStrLn $ "Opening " ++ outputPath ++ " with xdg-open..."
-            _ <- spawnProcess "xdg-open" [outputPath]
+            -- Open the file with appropriate command for the platform
+            let openCommand = getOpenCommand
+            logInfo $ "Opening " ++ outputPath ++ " with " ++ openCommand
+            _ <- spawnProcess openCommand [outputPath]
             return ()
+
+-- | Get the appropriate command to open files based on the operating system
+getOpenCommand :: String
+getOpenCommand
+    | "mingw" `elem` words os = "start"      -- Windows
+    | "darwin" `elem` words os = "open"      -- macOS  
+    | otherwise = "xdg-open"                 -- Linux/Unix
 
 -- | Parse command line arguments
 parseArgs :: [String] -> IO (FilePath, FilePath)
 parseArgs [] = do
+    logError "No arguments provided"
     putStrLn "Usage: file-histogram <directory> [-o <output-file>]"
     putStrLn "  <directory>         Directory to analyze"
     putStrLn "  -o <output-file>    Output HTML file (default: file_size_histogram.html)"
     exitFailure
-parseArgs [dir] = return (dir, "file_size_histogram.html")
-parseArgs [dir, "-o", output] = return (dir, output)
-parseArgs ("-o":output:dir:_) = return (dir, output)
-parseArgs _ = do
+parseArgs [dir] = do
+    logDebug $ "Using default output file for directory: " ++ dir
+    return (dir, "file_size_histogram.html")
+parseArgs [dir, "-o", output] = do
+    logDebug $ "Directory: " ++ dir ++ ", Output: " ++ output
+    return (dir, output)
+parseArgs ("-o":output:dir:_) = do
+    logDebug $ "Directory: " ++ dir ++ ", Output: " ++ output
+    return (dir, output)
+parseArgs args = do
+    logError $ "Invalid arguments: " ++ show args
     putStrLn "Invalid arguments. Usage: file-histogram <directory> [-o <output-file>]"
     exitFailure
 
@@ -157,7 +127,10 @@ parseArgs _ = do
 fileHistogramCli :: IO ()
 fileHistogramCli = do
     args <- getArgs
+    logDebug $ "Command line arguments: " ++ show args
     (inputPath, outputPath) <- parseArgs args
+    logInfo $ "Input directory: " ++ inputPath
+    logInfo $ "Output file: " ++ outputPath
     generateHistogram inputPath outputPath
 
 -- | Main entry point
