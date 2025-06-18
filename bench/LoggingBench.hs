@@ -5,7 +5,7 @@ import Control.Monad (replicateM_, forM_, replicateM)
 import Control.Monad.IO.Class (liftIO)
 import Control.Concurrent.Async
 import Control.Concurrent (threadDelay)
-import System.IO (withFile, IOMode(..), hClose)
+import System.IO (withFile, IOMode(..), hClose, stderr)
 import System.IO.Temp (withSystemTempFile)
 
 import Logging
@@ -30,6 +30,16 @@ generateMessage size = take size $ cycle "This is a test log message with some c
 -- | Main benchmark suite
 main :: IO ()
 main = do
+    -- IMMEDIATELY disable console logging globally
+    let quietConfig = LogConfig 
+            { minLogLevel = ERROR  -- Only errors
+            , logHandle = stderr   -- Doesn't matter, won't be used
+            , enableAsync = False
+            , bufferSize = 1000
+            , enableConsole = False  -- CRITICAL: No console output
+            }
+    initLogging quietConfig
+    
     withSystemTempFile "bench.log" $ \path1 handle1 -> do
         hClose handle1
         withSystemTempFile "bench-concurrent.log" $ \path2 handle2 -> do

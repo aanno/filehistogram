@@ -101,16 +101,19 @@ initLogging config = liftIO $ do
 
 -- | Run the log processing worker
 runLogWorker :: LogConfig -> IO ()
-runLogWorker config = do
-    S.fold (logFold config) logEntryStream
+runLogWorker _initialConfig = do
+    S.fold logFold logEntryStream
   where
     -- Stream of log entries from the queue
     logEntryStream :: Stream IO LogEntry
     logEntryStream = S.repeatM $ atomically $ readTBQueue globalLogQueue
     
-    -- Fold that processes log entries
-    logFold :: LogConfig -> Fold.Fold IO LogEntry ()
-    logFold cfg = Fold.drainMapM (writeLogEntry cfg)
+    -- Fold that processes log entries using current config
+    logFold :: Fold.Fold IO LogEntry ()
+    logFold = Fold.drainMapM $ \entry -> do
+        -- Always get the current config from global state
+        currentConfig <- readIORef globalLogConfig
+        writeLogEntry currentConfig entry
 
 -- | Write a single log entry to the configured handle
 writeLogEntry :: LogConfig -> LogEntry -> IO ()
@@ -118,11 +121,11 @@ writeLogEntry config entry = do
     let timeStr = formatTime defaultTimeLocale "%Y-%m-%d %H:%M:%S" (logTimestamp entry)
         formatted = "[" ++ show (logLevel entry) ++ "] " ++ timeStr ++ " - " ++ logMessageString entry
     
-    -- Always write to the configured handle
+    -- Always write to the configured handle (file)
     hPutStrLn (logHandle config) formatted
     
-    -- Only write to console if enabled AND it's a different handle
-    when (enableConsole config && logHandle config /= stderr) $
+    -- Only write to console/stderr if explicitly enabled
+    when (enableConsole config) $
         hPutStrLn stderr formatted
 
 -- | Main logging function
@@ -133,20 +136,22 @@ logMessage level msg = liftIO $ do
         timestamp <- getCurrentTime
         let entry = LogEntry level timestamp msg "main"
         
-        if enableAsync config
-            then do
-                -- Try to write to queue with longer timeout
-                result <- atomically $ do
-                    full <- isFullTBQueue globalLogQueue
-                    if full
-                        then return False
-                        else do
-                            writeTBQueue globalLogQueue entry
-                            return True
-                when (not result) $
-                    -- If queue is full, fall back to synchronous logging
-                    writeLogEntry config entry
-            else writeLogEntry config entry
+        -- TEMPORARY: Completely disable all logging to debug
+        -- if enableAsync config
+        --     then do
+        --         -- Try to write to queue with longer timeout
+        --         result <- atomically $ do
+        --             full <- isFullTBQueue globalLogQueue
+        --             if full
+        --                 then return False
+        --                 else do
+        --                     writeTBQueue globalLogQueue entry
+        --                     return True
+        --         when (not result) $
+        --             -- If queue is full, fall back to synchronous logging
+        --             writeLogEntry config entry
+        --     else writeLogEntry config entry
+        return ()  -- Completely disable logging for now
 
 -- | Convenience logging functions
 logDebug, logInfo, logWarn, logError :: MonadIO m => String -> m ()
