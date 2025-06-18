@@ -7,7 +7,7 @@ module FileHistogram
     , createReadableHistogram
     , formatFileSize
     , generateHistogram
-    , main
+    , fileHistogramCli
     ) where
 
 import Graphics.Vega.VegaLite
@@ -149,8 +149,8 @@ generateHistogram inputPath outputPath = do
             putStrLn $ "Histogram saved to: " ++ outputPath
 
 -- | Example usage
-main :: IO ()
-main = do
+fileHistogramCli :: IO ()
+fileHistogramCli = do
     putStrLn "Enter directory path to analyze:"
     path <- getLine
     let outputFile = "file_size_histogram.html"
