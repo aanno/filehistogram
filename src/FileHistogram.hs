@@ -8,43 +8,44 @@ module FileHistogram
     , fileHistogramCli
     ) where
 
-import Graphics.Vega.VegaLite
+import qualified Graphics.Vega.VegaLite as VL
+import Graphics.Vega.VegaLite (VegaLite)
 import System.Directory
 import System.FilePath
 import System.Environment
 import System.Process
 import System.Exit
 import Control.Monad
--- import Data.Aeson
+import Data.Aeson
+import qualified Data.Text as T
 import qualified Data.Text.Lazy as TL
 
 -- | Create histogram with logarithmic scaling for both axes
 createHistogram :: [Integer] -> VegaLite
 createHistogram sizes =
-    let fileSizeData = dataFromColumns []
-            . dataColumn "size" (Numbers $ map fromInteger sizes)
-            $ []
+    let         -- Filter out zero-byte files for log scale
+        nonZeroSizes = filter (> 0) sizes
+        fileSizeData = VL.dataFromJson (toJSON $ map (\fileSize -> object ["size" .= fileSize]) nonZeroSizes) []
 
-        enc = encoding
-            . position X [ PName "size"
-                        , PmType Quantitative
-                        , PTitle "File Size (bytes)"
-                        , PScale [SType ScLog]  -- Logarithmic scale
-                        , PBin [MaxBins 25]
+        enc = VL.encoding
+            . VL.position VL.X [ VL.PName "size"
+                        , VL.PmType VL.Quantitative
+                        , VL.PTitle "File Size (bytes, log scale)"
+                        , VL.PScale [VL.SType VL.ScLog]  -- Logarithmic scale
+                        , VL.PBin [VL.MaxBins 25]
                         ]
-            . position Y [ PAggregate Count
-                        , PmType Quantitative
-                        , PTitle "Number of Files"
-                        , PScale [SType ScLog]  -- Log scale for counts
+            . VL.position VL.Y [ VL.PAggregate VL.Count
+                        , VL.PmType VL.Quantitative
+                        , VL.PTitle "Number of Files"
                         ]
-            . color [MString "#4682B4"]
+            . VL.color [VL.MString "#4682B4"]
 
-    in toVegaLite
-        [ title "File Size Distribution (Log Scale)" []
-        , width 700
-        , height 450
+    in VL.toVegaLite
+        [ VL.title (T.pack $ "File Size Distribution (" ++ show (length nonZeroSizes) ++ " files with size > 0)") []
+        , VL.width 700
+        , VL.height 450
         , fileSizeData
-        , mark Bar [MTooltip TTEncoding]
+        , VL.mark VL.Bar [VL.MTooltip VL.TTEncoding]
         , enc []
         ]
 
@@ -94,7 +95,7 @@ generateHistogram inputPath outputPath = do
             let histogram = createHistogram sizes
             
             -- Save to HTML file
-            writeFile outputPath $ TL.unpack $ toHtml histogram
+            writeFile outputPath $ TL.unpack $ VL.toHtml histogram
             putStrLn $ "Histogram saved to: " ++ outputPath
             
             -- Open the file with xdg-open
