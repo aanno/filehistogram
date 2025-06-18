@@ -50,7 +50,7 @@ createHistogramNotWorking sizes =
         , enc []
         ]
 
--- | Create histogram with logarithmic transformation
+-- | Create histogram with logarithmic transformation and proper file size formatting
 createHistogram :: [Integer] -> VegaLite
 createHistogram allSizes =
     -- Filter out zero-byte files and transform to log
@@ -64,18 +64,20 @@ createHistogram allSizes =
         enc = VL.encoding
             . VL.position VL.X [ VL.PName "log_size"
                         , VL.PmType VL.Quantitative
-                        , VL.PTitle "File Size (log₁₀ bytes)"
+                        , VL.PTitle "File Size (log scale)"
                         , VL.PBin [VL.MaxBins 20]
+                        -- Format the axis labels to show actual file sizes
+                        , VL.PAxis [ VL.AxLabelExpr "pow(10, datum.value) < 1024 ? pow(10, datum.value) + ' B' : pow(10, datum.value) < 1048576 ? floor(pow(10, datum.value)/1024) + ' KB' : pow(10, datum.value) < 1073741824 ? floor(pow(10, datum.value)/1048576) + ' MB' : floor(pow(10, datum.value)/1073741824) + ' GB'" ]
                         ]
             . VL.position VL.Y [ VL.PAggregate VL.Count
                         , VL.PmType VL.Quantitative
-                        , VL.PScale [VL.SType VL.ScLog]  -- Logarithmic scale
-                        , VL.PTitle "Number of Files"
+                        , VL.PScale [VL.SType VL.ScLog]  -- Logarithmic scale on Y
+                        , VL.PTitle "Number of Files (log scale)"
                         ]
             . VL.color [VL.MString "#4682B4"]
 
     in VL.toVegaLite
-        [ VL.title "File Size Distribution (Log Transformed)" []
+        [ VL.title "File Size Distribution (Log Scale)" []
         , VL.width 600
         , VL.height 400
         , fileSizeData

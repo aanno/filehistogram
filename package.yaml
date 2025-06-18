@@ -38,6 +38,10 @@ ghc-options:
 - -Wmissing-home-modules
 - -Wpartial-fields
 - -Wredundant-constraints
+# realy needed?
+- -threaded
+- -rtsopts
+- -with-rtsopts=-N
 
 library:
   source-dirs: src
