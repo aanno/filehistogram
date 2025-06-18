@@ -66,6 +66,33 @@ createHistogram sizes =
         , enc []
         ]
 
+-- | Create a simple, working histogram
+createSimpleHistogram :: [Integer] -> VegaLite
+createSimpleHistogram sizes = 
+    let fileSizeData = dataFromColumns [] 
+            . dataColumn "size" (Numbers $ map fromInteger sizes) 
+            $ []
+        
+        enc = encoding
+            . position X [ PName "size"
+                        , PmType Quantitative
+                        , PTitle "File Size (bytes)"
+                        , PBin [MaxBins 20]
+                        ]
+            . position Y [ PAggregate Count
+                        , PmType Quantitative
+                        , PTitle "Number of Files"
+                        ]
+    
+    in toVegaLite 
+        [ title "File Size Distribution" []
+        , width 600
+        , height 400
+        , fileSizeData
+        , mark Bar []
+        , enc []
+        ]
+
 -- | Alternative histogram with linear scale and auto binning
 createLinearHistogram :: [Integer] -> VegaLite
 createLinearHistogram sizes = 
