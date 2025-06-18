@@ -2,7 +2,7 @@
 
 module FileHistogram 
     ( getFileSizes
-    , createSimpleHistogram
+    , createHistogram
     , formatFileSize
     , generateHistogram
     , fileHistogramCli
@@ -11,13 +11,16 @@ module FileHistogram
 import Graphics.Vega.VegaLite
 import System.Directory
 import System.FilePath
+import System.Environment
+import System.Process
+import System.Exit
 import Control.Monad
-import Data.Aeson
+-- import Data.Aeson
 import qualified Data.Text.Lazy as TL
 
--- | Create histogram with human-readable file sizes
-createSimpleHistogram :: [Integer] -> VegaLite
-createSimpleHistogram sizes =
+-- | Create histogram with logarithmic scaling for both axes
+createHistogram :: [Integer] -> VegaLite
+createHistogram sizes =
     let fileSizeData = dataFromColumns []
             . dataColumn "size" (Numbers $ map fromInteger sizes)
             $ []
@@ -26,19 +29,22 @@ createSimpleHistogram sizes =
             . position X [ PName "size"
                         , PmType Quantitative
                         , PTitle "File Size (bytes)"
-                        , PBin [MaxBins 20]
+                        , PScale [SType ScLog]  -- Logarithmic scale
+                        , PBin [MaxBins 25]
                         ]
             . position Y [ PAggregate Count
                         , PmType Quantitative
                         , PTitle "Number of Files"
+                        , PScale [SType ScLog]  -- Log scale for counts
                         ]
+            . color [MString "#4682B4"]
 
     in toVegaLite
-        [ title "File Size Distribution" []
-        , width 600
-        , height 400
+        [ title "File Size Distribution (Log Scale)" []
+        , width 700
+        , height 450
         , fileSizeData
-        , mark Bar []
+        , mark Bar [MTooltip TTEncoding]
         , enc []
         ]
 
@@ -65,86 +71,6 @@ getFileSizes path = do
             putStrLn $ "Directory does not exist: " ++ path
             return []
 
--- | Create histogram specification using hvega
-createHistogram :: [Integer] -> VegaLite
-createHistogram sizes = 
-    let fileSizeData = dataFromJson (toJSON $ map (\fileSize -> object ["size" .= fileSize]) sizes) []
-        
-        enc = encoding
-            . position X [ PName "size"
-                        , PmType Quantitative
-                        , PTitle "File Size (bytes)"
-                        , PScale [SType ScLog]  -- Log scale for better visualization of wide range
-                        , PBin [MaxBins 30]
-                        ]
-            . position Y [ PAggregate Count
-                        , PmType Quantitative
-                        , PTitle "Number of Files"
-                        ]
-    
-    in toVegaLite 
-        [ title "File Size Distribution" []
-        , width 600
-        , height 400
-        , fileSizeData
-        , mark Bar []
-        , enc []
-        ]
-
--- | Alternative histogram with linear scale and auto binning
-createLinearHistogram :: [Integer] -> VegaLite
-createLinearHistogram sizes = 
-    let fileSizeData = dataFromJson (toJSON $ map (\fileSize -> object ["size" .= fileSize]) sizes) []
-        
-        enc = encoding
-            . position X [ PName "size"
-                        , PmType Quantitative
-                        , PTitle "File Size (bytes)"
-                        , PBin [MaxBins 30]  -- Auto binning with max 30 bins
-                        ]
-            . position Y [ PAggregate Count
-                        , PmType Quantitative
-                        , PTitle "Number of Files"
-                        ]
-    
-    in toVegaLite 
-        [ title "File Size Distribution (Linear Scale)" []
-        , width 600
-        , height 400
-        , fileSizeData
-        , mark Bar []
-        , enc []
-        ]
-
--- | Create histogram with human-readable file sizes
-createReadableHistogram :: [Integer] -> VegaLite
-createReadableHistogram sizes = 
-    let fileSizeData = dataFromJson (toJSON $ map (\fileSize -> 
-            let readableSize = formatFileSize fileSize
-            in object ["size" .= fileSize, "readable_size" .= readableSize]
-            ) sizes) []
-        
-        enc = encoding
-            . position X [ PName "size"
-                        , PmType Quantitative
-                        , PTitle "File Size (bytes)"
-                        , PBin [MaxBins 25]
-                        ]
-            . position Y [ PAggregate Count
-                        , PmType Quantitative
-                        , PTitle "Number of Files"
-                        ]
-            . color [MString "#4682B4"]
-    
-    in toVegaLite 
-        [ title "File Size Distribution" []
-        , width 700
-        , height 450
-        , fileSizeData
-        , mark Bar [MTooltip TTEncoding]
-        , enc []
-        ]
-
 -- | Format file size in human-readable format
 formatFileSize :: Integer -> String
 formatFileSize bytes
@@ -165,16 +91,34 @@ generateHistogram inputPath outputPath = do
             putStrLn $ "Found " ++ show (length sizes) ++ " files"
             putStrLn $ "Size range: " ++ formatFileSize (minimum sizes) ++ " - " ++ formatFileSize (maximum sizes)
             
-            let histogram = createSimpleHistogram sizes
+            let histogram = createHistogram sizes
             
             -- Save to HTML file
             writeFile outputPath $ TL.unpack $ toHtml histogram
             putStrLn $ "Histogram saved to: " ++ outputPath
+            
+            -- Open the file with xdg-open
+            putStrLn $ "Opening " ++ outputPath ++ " with xdg-open..."
+            _ <- spawnProcess "xdg-open" [outputPath]
+            return ()
 
--- | Example usage
+-- | Parse command line arguments
+parseArgs :: [String] -> IO (FilePath, FilePath)
+parseArgs [] = do
+    putStrLn "Usage: file-histogram <directory> [-o <output-file>]"
+    putStrLn "  <directory>         Directory to analyze"
+    putStrLn "  -o <output-file>    Output HTML file (default: file_size_histogram.html)"
+    exitFailure
+parseArgs [dir] = return (dir, "file_size_histogram.html")
+parseArgs [dir, "-o", output] = return (dir, output)
+parseArgs ("-o":output:dir:_) = return (dir, output)
+parseArgs _ = do
+    putStrLn "Invalid arguments. Usage: file-histogram <directory> [-o <output-file>]"
+    exitFailure
+
+-- | Command line interface
 fileHistogramCli :: IO ()
 fileHistogramCli = do
-    putStrLn "Enter directory path to analyze:"
-    path <- getLine
-    let outputFile = "file_size_histogram.html"
-    generateHistogram path outputFile
+    args <- getArgs
+    (inputPath, outputPath) <- parseArgs args
+    generateHistogram inputPath outputPath
