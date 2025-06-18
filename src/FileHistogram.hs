@@ -102,9 +102,8 @@ createReadableHistogram sizes =
         enc = encoding
             . position X [ PName "size"
                         , PmType Quantitative
-                        , PTitle "File Size"
+                        , PTitle "File Size (bytes)"
                         , PBin [MaxBins 25]
-                        , PAxis [AxLabelExpr "datum.value < 1024 ? datum.value + ' B' : datum.value < 1048576 ? (datum.value/1024).toFixed(1) + ' KB' : datum.value < 1073741824 ? (datum.value/1048576).toFixed(1) + ' MB' : (datum.value/1073741824).toFixed(1) + ' GB'"]
                         ]
             . position Y [ PAggregate Count
                         , PmType Quantitative
@@ -119,7 +118,6 @@ createReadableHistogram sizes =
         , fileSizeData
         , mark Bar [MTooltip TTEncoding]
         , enc []
-        , selection . select "brush" Interval [BindScales] $ []
         ]
 
 -- | Format file size in human-readable format
