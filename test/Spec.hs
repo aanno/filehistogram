@@ -1,5 +1,9 @@
+{-# LANGUAGE OverloadedStrings #-}
+module Spec where
+
 import Test.Hspec
-import FileHistogram (getFileSizes, createHistogram, formatFileSize)
+import FileHistogram (createHistogram, formatFileSize)
+import FileScanner (getFileSizes)
 import System.Directory (createDirectoryIfMissing, removeDirectoryRecursive)
 import System.FilePath ((</>))
 import System.IO (writeFile)
