@@ -2,9 +2,7 @@
 
 module FileHistogram 
     ( getFileSizes
-    , createHistogram
-    , createLinearHistogram
-    , createReadableHistogram
+    , createSimpleHistogram
     , formatFileSize
     , generateHistogram
     , fileHistogramCli
@@ -16,6 +14,33 @@ import System.FilePath
 import Control.Monad
 import Data.Aeson
 import qualified Data.Text.Lazy as TL
+
+-- | Create histogram with human-readable file sizes
+createSimpleHistogram :: [Integer] -> VegaLite
+createSimpleHistogram sizes =
+    let fileSizeData = dataFromColumns []
+            . dataColumn "size" (Numbers $ map fromInteger sizes)
+            $ []
+
+        enc = encoding
+            . position X [ PName "size"
+                        , PmType Quantitative
+                        , PTitle "File Size (bytes)"
+                        , PBin [MaxBins 20]
+                        ]
+            . position Y [ PAggregate Count
+                        , PmType Quantitative
+                        , PTitle "Number of Files"
+                        ]
+
+    in toVegaLite
+        [ title "File Size Distribution" []
+        , width 600
+        , height 400
+        , fileSizeData
+        , mark Bar []
+        , enc []
+        ]
 
 -- | Get all file sizes recursively from a directory
 getFileSizes :: FilePath -> IO [Integer]
@@ -51,33 +76,6 @@ createHistogram sizes =
                         , PTitle "File Size (bytes)"
                         , PScale [SType ScLog]  -- Log scale for better visualization of wide range
                         , PBin [MaxBins 30]
-                        ]
-            . position Y [ PAggregate Count
-                        , PmType Quantitative
-                        , PTitle "Number of Files"
-                        ]
-    
-    in toVegaLite 
-        [ title "File Size Distribution" []
-        , width 600
-        , height 400
-        , fileSizeData
-        , mark Bar []
-        , enc []
-        ]
-
--- | Create a simple, working histogram
-createSimpleHistogram :: [Integer] -> VegaLite
-createSimpleHistogram sizes = 
-    let fileSizeData = dataFromColumns [] 
-            . dataColumn "size" (Numbers $ map fromInteger sizes) 
-            $ []
-        
-        enc = encoding
-            . position X [ PName "size"
-                        , PmType Quantitative
-                        , PTitle "File Size (bytes)"
-                        , PBin [MaxBins 20]
                         ]
             . position Y [ PAggregate Count
                         , PmType Quantitative
@@ -167,7 +165,7 @@ generateHistogram inputPath outputPath = do
             putStrLn $ "Found " ++ show (length sizes) ++ " files"
             putStrLn $ "Size range: " ++ formatFileSize (minimum sizes) ++ " - " ++ formatFileSize (maximum sizes)
             
-            let histogram = createReadableHistogram sizes
+            let histogram = createSimpleHistogram sizes
             
             -- Save to HTML file
             writeFile outputPath $ TL.unpack $ toHtml histogram
