@@ -3,7 +3,7 @@
 -- | Complete benchmark suite for filehistogram
 module Main where
 
-import System.Environment (getArgs)
+import System.Environment (getArgs, withArgs)
 
 -- Import our benchmark modules  
 import qualified LoggingBench as LB
@@ -15,31 +15,22 @@ main = do
     case args of
         ["logging"] -> do
             putStrLn "Running logging benchmarks only..."
-            LB.main
+            -- Clear args so LoggingBench.main doesn't see "logging"
+            withArgs [] LB.main
             
         ["scanner"] -> do
             putStrLn "Running file scanner benchmarks only..."
-            FSB.runFileScannerBenchmarks
+            -- Clear args so FileScannerBench doesn't see "scanner"  
+            withArgs [] FSB.runFileScannerBenchmarks
             
-        ["all"] -> do
-            putStrLn "Running complete benchmark suite..."
+        [] -> do
+            putStrLn "Running logging benchmarks (default)..."
             putStrLn $ "\n" ++ replicate 60 '='
             putStrLn "LOGGING BENCHMARKS"
             putStrLn $ replicate 60 '='
-            LB.main
-            
-            putStrLn $ "\n" ++ replicate 60 '='  
-            putStrLn "FILE SCANNER BENCHMARKS"
-            putStrLn $ replicate 60 '='
-            FSB.runFileScannerBenchmarks
+            withArgs [] LB.main
             
         _ -> do
-            putStrLn "Usage: benchmark [logging|scanner|all]"
-            putStrLn ""
-            putStrLn "  logging  - Run only logging performance tests"
-            putStrLn "  scanner  - Run only file scanner performance tests"  
-            putStrLn "  all      - Run complete benchmark suite"
-            putStrLn ""
-            putStrLn "Examples:"
-            putStrLn "  stack bench --benchmark-arguments=\"logging\""
-            putStrLn "  stack bench --benchmark-arguments=\"all\""
+            -- Pass through any other arguments to LoggingBench for standard gauge options
+            putStrLn "Running logging benchmarks with gauge arguments..."
+            LB.main
