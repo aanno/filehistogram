@@ -136,22 +136,20 @@ logMessage level msg = liftIO $ do
         timestamp <- getCurrentTime
         let entry = LogEntry level timestamp msg "main"
         
-        -- TEMPORARY: Completely disable all logging to debug
-        -- if enableAsync config
-        --     then do
-        --         -- Try to write to queue with longer timeout
-        --         result <- atomically $ do
-        --             full <- isFullTBQueue globalLogQueue
-        --             if full
-        --                 then return False
-        --                 else do
-        --                     writeTBQueue globalLogQueue entry
-        --                     return True
-        --         when (not result) $
-        --             -- If queue is full, fall back to synchronous logging
-        --             writeLogEntry config entry
-        --     else writeLogEntry config entry
-        return ()  -- Completely disable logging for now
+        if enableAsync config
+            then do
+                -- Try to write to queue with longer timeout
+                result <- atomically $ do
+                    full <- isFullTBQueue globalLogQueue
+                    if full
+                        then return False
+                        else do
+                            writeTBQueue globalLogQueue entry
+                            return True
+                when (not result) $
+                    -- If queue is full, fall back to synchronous logging
+                    writeLogEntry config entry
+            else writeLogEntry config entry
 
 -- | Convenience logging functions
 logDebug, logInfo, logWarn, logError :: MonadIO m => String -> m ()
