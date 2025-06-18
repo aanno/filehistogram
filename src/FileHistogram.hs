@@ -50,29 +50,32 @@ createHistogramNotWorking sizes =
         , enc []
         ]
 
--- | Create histogram with human-readable file sizes
+-- | Create histogram with logarithmic transformation
 createHistogram :: [Integer] -> VegaLite
-createHistogram sizes =
-    let fileSizeData = VL.dataFromColumns []
+createHistogram allSizes =
+    -- Filter out zero-byte files and transform to log
+    let sizes = filter (> 0) allSizes
+        logSizes = map (logBase 10 . fromInteger) sizes
+        fileSizeData = VL.dataFromColumns []
+            . VL.dataColumn "log_size" (VL.Numbers logSizes)
             . VL.dataColumn "size" (VL.Numbers $ map fromInteger sizes)
             $ []
 
         enc = VL.encoding
-            . VL.position VL.X [ VL.PName "size"
+            . VL.position VL.X [ VL.PName "log_size"
                         , VL.PmType VL.Quantitative
-                        , VL.PTitle "File Size (bytes)"
-                        -- , VL.PScale [VL.SType VL.ScLog]  -- Logarithmic scale
+                        , VL.PTitle "File Size (log₁₀ bytes)"
                         , VL.PBin [VL.MaxBins 20]
                         ]
             . VL.position VL.Y [ VL.PAggregate VL.Count
                         , VL.PmType VL.Quantitative
-                        -- , VL.PScale [VL.SType VL.ScLog]  -- Logarithmic scale
+                        , VL.PScale [VL.SType VL.ScLog]  -- Logarithmic scale
                         , VL.PTitle "Number of Files"
                         ]
             . VL.color [VL.MString "#4682B4"]
 
     in VL.toVegaLite
-        [ VL.title "File Size Distribution" []
+        [ VL.title "File Size Distribution (Log Transformed)" []
         , VL.width 600
         , VL.height 400
         , fileSizeData
