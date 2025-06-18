@@ -6,6 +6,7 @@ module FileHistogram
     , formatFileSize
     , generateHistogram
     , fileHistogramCli
+    , main
     ) where
 
 import qualified Graphics.Vega.VegaLite as VL
@@ -21,8 +22,8 @@ import qualified Data.Text as T
 import qualified Data.Text.Lazy as TL
 
 -- | Create histogram with logarithmic scaling for both axes
-createHistogram :: [Integer] -> VegaLite
-createHistogram sizes =
+createHistogramNotWorking :: [Integer] -> VegaLite
+createHistogramNotWorking sizes =
     let         -- Filter out zero-byte files for log scale
         nonZeroSizes = filter (> 0) sizes
         fileSizeData = VL.dataFromJson (toJSON $ map (\fileSize -> object ["size" .= fileSize]) nonZeroSizes) []
@@ -46,6 +47,36 @@ createHistogram sizes =
         , VL.height 450
         , fileSizeData
         , VL.mark VL.Bar [VL.MTooltip VL.TTEncoding]
+        , enc []
+        ]
+
+-- | Create histogram with human-readable file sizes
+createHistogram :: [Integer] -> VegaLite
+createHistogram sizes =
+    let fileSizeData = VL.dataFromColumns []
+            . VL.dataColumn "size" (VL.Numbers $ map fromInteger sizes)
+            $ []
+
+        enc = VL.encoding
+            . VL.position VL.X [ VL.PName "size"
+                        , VL.PmType VL.Quantitative
+                        , VL.PTitle "File Size (bytes)"
+                        -- , VL.PScale [VL.SType VL.ScLog]  -- Logarithmic scale
+                        , VL.PBin [VL.MaxBins 20]
+                        ]
+            . VL.position VL.Y [ VL.PAggregate VL.Count
+                        , VL.PmType VL.Quantitative
+                        -- , VL.PScale [VL.SType VL.ScLog]  -- Logarithmic scale
+                        , VL.PTitle "Number of Files"
+                        ]
+            . VL.color [VL.MString "#4682B4"]
+
+    in VL.toVegaLite
+        [ VL.title "File Size Distribution" []
+        , VL.width 600
+        , VL.height 400
+        , fileSizeData
+        , VL.mark VL.Bar []
         , enc []
         ]
 
@@ -123,3 +154,7 @@ fileHistogramCli = do
     args <- getArgs
     (inputPath, outputPath) <- parseArgs args
     generateHistogram inputPath outputPath
+
+-- | Main entry point
+main :: IO ()
+main = fileHistogramCli
