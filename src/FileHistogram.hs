@@ -1,15 +1,21 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-module FileHistogram where
+module FileHistogram 
+    ( getFileSizes
+    , createHistogram
+    , createLinearHistogram
+    , createReadableHistogram
+    , formatFileSize
+    , generateHistogram
+    , main
+    ) where
 
 import Graphics.Vega.VegaLite
 import System.Directory
 import System.FilePath
 import Control.Monad
 import Data.Aeson
-import qualified Data.Text as T
 import qualified Data.Text.Lazy as TL
-import System.IO
 
 -- | Get all file sizes recursively from a directory
 getFileSizes :: FilePath -> IO [Integer]
@@ -24,8 +30,8 @@ getFileSizes path = do
                 isDir <- doesDirectoryExist fullPath
                 if isFile
                     then do
-                        size <- getFileSize fullPath
-                        return [size]
+                        fileSize <- getFileSize fullPath
+                        return [fileSize]
                     else if isDir
                         then getFileSizes fullPath
                         else return []
@@ -37,7 +43,7 @@ getFileSizes path = do
 -- | Create histogram specification using hvega
 createHistogram :: [Integer] -> VegaLite
 createHistogram sizes = 
-    let fileSizeData = dataFromJson (toJSON $ map (\size -> object ["size" .= size]) sizes) []
+    let fileSizeData = dataFromJson (toJSON $ map (\fileSize -> object ["size" .= fileSize]) sizes) []
         
         enc = encoding
             . position X [ PName "size"
@@ -63,7 +69,7 @@ createHistogram sizes =
 -- | Alternative histogram with linear scale and auto binning
 createLinearHistogram :: [Integer] -> VegaLite
 createLinearHistogram sizes = 
-    let fileSizeData = dataFromJson (toJSON $ map (\size -> object ["size" .= size]) sizes) []
+    let fileSizeData = dataFromJson (toJSON $ map (\fileSize -> object ["size" .= fileSize]) sizes) []
         
         enc = encoding
             . position X [ PName "size"
@@ -88,9 +94,9 @@ createLinearHistogram sizes =
 -- | Create histogram with human-readable file sizes
 createReadableHistogram :: [Integer] -> VegaLite
 createReadableHistogram sizes = 
-    let fileSizeData = dataFromJson (toJSON $ map (\size -> 
-            let readable = formatFileSize size
-            in object ["size" .= size, "readable_size" .= readable]
+    let fileSizeData = dataFromJson (toJSON $ map (\fileSize -> 
+            let readableSize = formatFileSize fileSize
+            in object ["size" .= fileSize, "readable_size" .= readableSize]
             ) sizes) []
         
         enc = encoding
@@ -120,9 +126,9 @@ createReadableHistogram sizes =
 formatFileSize :: Integer -> String
 formatFileSize bytes
     | bytes < 1024 = show bytes ++ " B"
-    | bytes < 1024^2 = show (bytes `div` 1024) ++ " KB"
-    | bytes < 1024^3 = show (bytes `div` (1024^2)) ++ " MB"
-    | otherwise = show (bytes `div` (1024^3)) ++ " GB"
+    | bytes < (1024 :: Integer)^(2 :: Integer) = show (bytes `div` 1024) ++ " KB"
+    | bytes < (1024 :: Integer)^(3 :: Integer) = show (bytes `div` ((1024 :: Integer)^(2 :: Integer))) ++ " MB"
+    | otherwise = show (bytes `div` ((1024 :: Integer)^(3 :: Integer))) ++ " GB"
 
 -- | Main function to generate and save histogram
 generateHistogram :: FilePath -> FilePath -> IO ()
