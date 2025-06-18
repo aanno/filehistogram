@@ -17,10 +17,10 @@
 #
 # snapshot: ./custom-snapshot.yaml
 # snapshot: https://example.com/snapshots/2024-01-01.yaml
-#snapshot:
-#  url: https://raw.githubusercontent.com/commercialhaskell/stackage-snapshots/master/lts/23/25.yaml
+snapshot:
+  url: https://raw.githubusercontent.com/commercialhaskell/stackage-snapshots/master/lts/23/25.yaml
 
-resolver: ghc-9.12.2
+# resolver: ghc-9.12.2
 
 # User packages to be built.
 # Various formats can be used as shown in the example below.
@@ -43,6 +43,10 @@ packages:
 #   commit: e7b331f14bcffb8367cd58fbfc8b40ec7642100a
 #
 # extra-deps: []
+
+#extra-deps:
+#- aeson-2.2.3.0@sha256:7d48c2395ef168d2c2070fdb02c7998384be27d31a03bb35d1740af4a19a857b,6368
+#- hvega-0.12.0.7@sha256:c53272ed98f6c1926d8202cc1b0e13c6778c613718fcd1950f8accd4d9c1dc13,11152
 
 # Override default flag values for project packages and extra-deps
 # flags: {}
