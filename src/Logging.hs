@@ -46,6 +46,7 @@ data LogConfig = LogConfig
     , logHandle :: Handle
     , enableAsync :: Bool
     , bufferSize :: Int
+    , enableConsole :: Bool  -- New: whether to also log to console
     } deriving (Eq)
 
 -- | Default logging configuration
@@ -55,12 +56,13 @@ defaultLogConfig = LogConfig
     , logHandle = stderr
     , enableAsync = True
     , bufferSize = 100
+    , enableConsole = True  -- Default: log to both file and console
     }
 
 -- Global logging state
 {-# NOINLINE globalLogQueue #-}
 globalLogQueue :: TBQueue LogEntry
-globalLogQueue = unsafePerformIO $ newTBQueueIO 1000
+globalLogQueue = unsafePerformIO $ newTBQueueIO 50000  -- Much larger queue
 
 {-# NOINLINE globalLogConfig #-}
 globalLogConfig :: IORef LogConfig
@@ -85,6 +87,7 @@ getLogLevel = liftIO $ do
 -- | Initialize the logging system
 initLogging :: MonadIO m => LogConfig -> m ()
 initLogging config = liftIO $ do
+    -- Update the global config FIRST
     writeIORef globalLogConfig config
     
     when (enableAsync config) $ do
@@ -114,7 +117,13 @@ writeLogEntry :: LogConfig -> LogEntry -> IO ()
 writeLogEntry config entry = do
     let timeStr = formatTime defaultTimeLocale "%Y-%m-%d %H:%M:%S" (logTimestamp entry)
         formatted = "[" ++ show (logLevel entry) ++ "] " ++ timeStr ++ " - " ++ logMessageString entry
+    
+    -- Always write to the configured handle
     hPutStrLn (logHandle config) formatted
+    
+    -- Only write to console if enabled AND it's a different handle
+    when (enableConsole config && logHandle config /= stderr) $
+        hPutStrLn stderr formatted
 
 -- | Main logging function
 logMessage :: MonadIO m => LogLevel -> String -> m ()
@@ -126,7 +135,7 @@ logMessage level msg = liftIO $ do
         
         if enableAsync config
             then do
-                -- Try to write to queue, drop if full (non-blocking)
+                -- Try to write to queue with longer timeout
                 result <- atomically $ do
                     full <- isFullTBQueue globalLogQueue
                     if full
@@ -135,7 +144,8 @@ logMessage level msg = liftIO $ do
                             writeTBQueue globalLogQueue entry
                             return True
                 when (not result) $
-                    hPutStrLn stderr "Warning: Log queue full, dropping message"
+                    -- If queue is full, fall back to synchronous logging
+                    writeLogEntry config entry
             else writeLogEntry config entry
 
 -- | Convenience logging functions
@@ -154,11 +164,23 @@ logToStream level = S.mapM $ \msg -> liftIO $ do
 -- | Run an action with logging, cleaning up afterwards
 withLogging :: MonadIO m => LogConfig -> m a -> m a
 withLogging config action = do
+    -- Store old config
+    oldConfig <- liftIO $ readIORef globalLogConfig
+    
+    -- Initialize with new config
     initLogging config
+    
+    -- Run the action
     result <- action
+    
+    -- Cleanup and restore old config
     liftIO $ do
         -- Stop the log worker
         maybeWorker <- readIORef globalLogWorker
         forM_ maybeWorker cancel
         writeIORef globalLogWorker Nothing
+        
+        -- Restore old config
+        writeIORef globalLogConfig oldConfig
+    
     return result

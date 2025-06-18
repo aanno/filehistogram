@@ -109,26 +109,31 @@ benchmarkScanOptions = do
 benchmarkMemoryPatterns :: IO ()
 benchmarkMemoryPatterns = do
     withSystemTempDirectory "filescanner-memory" $ \tempDir -> do
-        -- Create a large directory structure
-        createTestDirectoryStructure tempDir 200 1000 1024
+        -- Create a moderate directory structure (not too large)
+        createTestDirectoryStructure tempDir 20 100 1024  -- Reduced size
         
         defaultMain
             [ bgroup "Memory Usage Patterns"
                 [ bench "collect all (high memory)" $ nfIO $ do
-                    initLogging defaultLogConfig { minLogLevel = ERROR }
+                    initLogging defaultLogConfig { minLogLevel = ERROR, enableConsole = False }
                     files <- scanFiles defaultScanOptions tempDir
                     return $ length files
                 
                 , bench "stream fold count (low memory)" $ nfIO $ do
-                    initLogging defaultLogConfig { minLogLevel = ERROR }
+                    initLogging defaultLogConfig { minLogLevel = ERROR, enableConsole = False }
                     count <- S.fold Fold.length $ scanFilesStream defaultScanOptions tempDir
                     return count
                 
                 , bench "stream fold sizes (low memory)" $ nfIO $ do
-                    initLogging defaultLogConfig { minLogLevel = ERROR }
+                    initLogging defaultLogConfig { minLogLevel = ERROR, enableConsole = False }
                     totalSize <- S.fold (Fold.foldl' (+) 0) $ 
                         S.mapM (return . fileSize) $ scanFilesStream defaultScanOptions tempDir
                     return totalSize
+                
+                , bench "stream with limit (constant memory)" $ nfIO $ do
+                    initLogging defaultLogConfig { minLogLevel = ERROR, enableConsole = False }
+                    count <- S.fold Fold.length $ S.take 500 $ scanFilesStream defaultScanOptions tempDir
+                    return count
                 ]
             ]
 
