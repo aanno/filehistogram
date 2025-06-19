@@ -135,11 +135,9 @@ displayProgress state = do
         rate = if elapsedSeconds > 0 then fromIntegral count / elapsedSeconds else 0 :: Double
         
         -- Build progress message components
-        spinnerChar = if showSpinnerFlag config 
-                     then spinnerChars !! psSpinnerState state
-                     else '.'
-        
-        countStr = show count ++ " files"
+        progressStr = case psTotal state of
+            Just total -> show count ++ " / " ++ show total ++ " files"
+            Nothing -> show count ++ " files"
         
         percentageStr :: String
         percentageStr = case psTotal state of
@@ -158,8 +156,8 @@ displayProgress state = do
                  else ""
         
         message :: String
-        message = printf "%s: %c %s%s%s%s" 
-                  (progressPrefix config) spinnerChar countStr percentageStr elapsedStr rateStr
+        message = printf "%s: %s%s%s%s" 
+                  (progressPrefix config) progressStr percentageStr elapsedStr rateStr
     
     -- Clear previous line and show new progress
     putStr "\r\ESC[K"  -- Clear current line
@@ -188,8 +186,7 @@ finishProgress stateMVar = liftIO $ do
 -- | Run an action with progress reporting
 withProgress :: MonadIO m => ProgressConfig -> Maybe Int -> (MVar ProgressState -> m a) -> m a
 withProgress config totalItems action = do
-    when (enableProgress config) $ liftIO $ putStrLn $ progressPrefix config ++ "..."
-    
+    -- Don't print initial message to avoid line overlap
     stateMVar <- initProgress config totalItems
     result <- action stateMVar
     finishProgress stateMVar

@@ -97,9 +97,13 @@ generateHistogramIncremental inputPath outputPath = do
     -- Auto-detect if we should show progress (interactive terminal)
     progressConfig <- progressConfigWithOverride True  -- Will auto-detect terminal
     
-    -- Use incremental streaming with progress indicators
-    withProgress (progressConfig { progressPrefix = "Scanning files" }) Nothing $ \progressMVar -> do
-        -- Collect all file sizes first, then process them
+    -- First pass: count files for better progress display
+    when (enableProgress progressConfig) $ putStr "Counting files... "
+    totalFiles <- S.fold Fold.length (scanFilesStream scanOpts inputPath)
+    when (enableProgress progressConfig) $ putStrLn $ "found " ++ show totalFiles ++ " files"
+    
+    -- Second pass: collect file sizes with progress
+    withProgress (progressConfig { progressPrefix = "Scanning files" }) (Just totalFiles) $ \progressMVar -> do
         allSizes <- S.fold (Fold.foldlM' (\acc size -> do
             let count = length acc + 1
             updateProgress progressMVar count
@@ -116,8 +120,8 @@ generateHistogramIncremental inputPath outputPath = do
                         then do
                             let minSize = minimum allSizes
                                 maxSize = maximum allSizes
-                            putStrLn $ "Size range: " ++ formatFileSize minSize ++ " - " ++ formatFileSize maxSize
-                        else putStrLn "No valid file sizes found"
+                            putStrLn $ "\nSize range: " ++ formatFileSize minSize ++ " - " ++ formatFileSize maxSize
+                        else putStrLn "\nNo valid file sizes found"
                     
                     when (enableProgress progressConfig) $ putStrLn "Generating histogram..."
                     logDebug $ "Creating histogram from " ++ show count ++ " file sizes"
