@@ -10,6 +10,7 @@ module FileHistogram
     ) where
 
 import qualified Data.Text.Lazy as TL
+import qualified Data.Text as T
 import qualified Graphics.Vega.VegaLite as VL
 import Graphics.Vega.VegaLite (VegaLite)
 import System.Info (os)
@@ -51,14 +52,25 @@ createHistogram allSizes =
                         ]
             . VL.color [VL.MString "#4682B4"]
 
-    in VL.toVegaLite
-        [ VL.title "File Size Distribution (Log Scale)" []
-        , VL.width 600
-        , VL.height 400
-        , fileSizeData
-        , VL.mark VL.Bar []
-        , enc []
-        ]
+    in if null sizes
+       then -- Create empty histogram for zero files
+            VL.toVegaLite
+                [ VL.title (T.pack "File Size Distribution (No Files Found)") []
+                , VL.width 600
+                , VL.height 400
+                , VL.dataFromColumns [] $ []
+                , VL.mark VL.Bar []
+                , enc []
+                ]
+       else -- Normal histogram
+            VL.toVegaLite
+                [ VL.title (T.pack $ "File Size Distribution (" ++ show (length sizes) ++ " files)") []
+                , VL.width 600
+                , VL.height 400
+                , fileSizeData
+                , VL.mark VL.Bar []
+                , enc []
+                ]
 
 -- | Format file size in human-readable format
 formatFileSize :: Integer -> String
@@ -87,32 +99,37 @@ generateHistogramIncremental inputPath outputPath = do
     
     -- Use incremental streaming with progress indicators
     withProgress (progressConfig { progressPrefix = "Scanning files" }) Nothing $ \progressMVar -> do
-        (count, minSize, maxSize, allSizes) <- S.fold 
-            (collectHistogramStats <$> 
-                Fold.foldlM' (\acc _ -> updateProgress progressMVar acc >> return (acc + 1)) (return 0) <*>
-                Fold.minimum <*> 
-                Fold.maximum <*> 
-                Fold.toList)
-            (getFileSizesStream scanOpts inputPath)
+        -- Collect all file sizes first, then process them
+        allSizes <- S.fold (Fold.foldlM' (\acc size -> do
+            let count = length acc + 1
+            updateProgress progressMVar count
+            return (size : acc)) (return [])) (getFileSizesStream scanOpts inputPath)
         
         liftIO $ do
+            let count = length allSizes
             if count == 0
                 then do
                     logWarn "No files found or directory doesn't exist"
                 else do
                     logInfo $ "Found " ++ show count ++ " files"
-                    case (minSize, maxSize) of
-                        (Just minS, Just maxS) -> 
-                            putStrLn $ "Size range: " ++ formatFileSize minS ++ " - " ++ formatFileSize maxS
-                        _ -> 
-                            putStrLn "Could not determine size range"
+                    if not (null allSizes)
+                        then do
+                            let minSize = minimum allSizes
+                                maxSize = maximum allSizes
+                            putStrLn $ "Size range: " ++ formatFileSize minSize ++ " - " ++ formatFileSize maxSize
+                        else putStrLn "No valid file sizes found"
                     
                     when (enableProgress progressConfig) $ putStrLn "Generating histogram..."
-                    let histogram = createHistogram allSizes
+                    logDebug $ "Creating histogram from " ++ show count ++ " file sizes"
+                    logDebug $ "Sample sizes: " ++ show (take 10 $ reverse allSizes)
+                    let histogram = createHistogram (reverse allSizes)  -- Reverse to get original order
+                        htmlContent = VL.toHtml histogram
+                    
+                    logDebug $ "Generated HTML content length: " ++ show (TL.length htmlContent)
                     
                     -- Save to HTML file
                     logInfo $ "Saving histogram to: " ++ outputPath
-                    writeFile outputPath $ TL.unpack $ VL.toHtml histogram
+                    writeFile outputPath $ TL.unpack htmlContent
                     putStrLn $ "Histogram saved to: " ++ outputPath
                     
                     -- Open the file with appropriate command for the platform
@@ -120,9 +137,6 @@ generateHistogramIncremental inputPath outputPath = do
                     logInfo $ "Opening " ++ outputPath ++ " with " ++ openCommand
                     _ <- spawnProcess openCommand [outputPath]
                     return ()
-  where
-    collectHistogramStats :: Int -> Maybe Integer -> Maybe Integer -> [Integer] -> (Int, Maybe Integer, Maybe Integer, [Integer])
-    collectHistogramStats c minS maxS sizes = (c, minS, maxS, sizes)
 
 -- | Traditional version (kept for compatibility)
 generateHistogramTraditional :: FilePath -> FilePath -> IO ()

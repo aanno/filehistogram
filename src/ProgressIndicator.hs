@@ -132,29 +132,34 @@ displayProgress state = do
         count = psCount state
         elapsed = diffUTCTime (psLastUpdate state) (psStartTime state)
         elapsedSeconds = realToFrac elapsed :: Double
-        rate = if elapsedSeconds > 0 then fromIntegral count / elapsedSeconds else 0
+        rate = if elapsedSeconds > 0 then fromIntegral count / elapsedSeconds else 0 :: Double
         
         -- Build progress message components
         spinnerChar = if showSpinnerFlag config 
-                     then [spinnerChars !! psSpinnerState state, ' ']
-                     else ""
+                     then spinnerChars !! psSpinnerState state
+                     else '.'
         
         countStr = show count ++ " files"
         
+        percentageStr :: String
         percentageStr = case psTotal state of
             Just total | showPercentage config && total > 0 -> 
                 printf " (%.1f%%)" (fromIntegral count * 100.0 / fromIntegral total :: Double)
             _ -> ""
         
+        elapsedStr :: String
         elapsedStr = if showElapsed config
                     then printf " [%.1fs]" elapsedSeconds
                     else ""
         
+        rateStr :: String
         rateStr = if showRate config && count > 0
                  then printf " (%.0f files/s)" rate
                  else ""
         
-        message = progressPrefix config ++ ": " ++ spinnerChar ++ countStr ++ percentageStr ++ elapsedStr ++ rateStr
+        message :: String
+        message = printf "%s: %c %s%s%s%s" 
+                  (progressPrefix config) spinnerChar countStr percentageStr elapsedStr rateStr
     
     -- Clear previous line and show new progress
     putStr "\r\ESC[K"  -- Clear current line
