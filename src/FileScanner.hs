@@ -19,6 +19,7 @@ import qualified Streamly.Data.Stream.Prelude as S
 import qualified Streamly.Data.Fold as Fold
 import Streamly.Data.Stream (Stream)
 import Logging
+import MountBoundary (shouldCrossFilesystemBoundary)
 
 -- | Configuration for file scanning
 data ScanOptions = ScanOptions
@@ -156,10 +157,11 @@ processItemsAcc opts dirPath visited depth (item:remainingItems) fileAcc workAcc
                             processItemsAcc opts dirPath visited depth remainingItems fileAcc workAcc
                 else if isDir
                     then do
-                        shouldCross <- if crossMountBoundaries opts
-                            then return True
-                            else checkSameFileSystem fullPath dirPath
-                        
+                        -- Process directory
+                        shouldCross <- shouldCrossFilesystemBoundary
+                                       (crossMountBoundaries opts)
+                                       fullPath
+                                       dirPath
                         if shouldCross
                             then do
                                 -- Add directory to work queue

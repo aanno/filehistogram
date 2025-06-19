@@ -32,6 +32,7 @@ dependencies:
 - streamly-core >= 0.2.3
 - text >= 2.1.1
 - time >= 1.12.2
+- unix >= 2.8.6.0
 - stm
 - async
 - temporary
