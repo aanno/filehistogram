@@ -10,6 +10,8 @@ import Logging
 -- Import our benchmark modules  
 import qualified LoggingBench as LB
 import qualified FileScannerBench as FSB
+import qualified FileHistogramBench as FHB
+import qualified Data.Text.Array as FHB
 
 main :: IO ()
 main = do
@@ -35,6 +37,11 @@ main = do
             -- Clear args so FileScannerBench doesn't see "scanner"  
             withArgs [] FSB.runFileScannerBenchmarks
             
+        ["histogram"] -> do
+            putStrLn "Running file scanner benchmarks only..."
+            -- Clear args so FileScannerBench doesn't see "scanner"  
+            withArgs [] FHB.runFileHistogramBenchmarks
+
         [] -> do
             putStrLn "Running logging benchmarks (default)..."
             putStrLn $ "\n" ++ replicate 60 '='
