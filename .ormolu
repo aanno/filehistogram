@@ -1,0 +1,28 @@
+# Ormolu configuration to match manual formatting style
+check-idempotence: true
+unsafe: false
+
+# Wider columns to avoid aggressive line breaking
+columns: 120
+
+# Keep function arrows and operators at end of line rather than leading
+function-arrows: trailing
+
+# More compact import/export style
+import-export-style: trailing
+
+# Allow single-line records and data constructors when reasonable
+haddock-style: single-line
+
+# Less aggressive about breaking let/where clauses
+let-style: inline
+in-style: right-align
+
+# Don't force newlines between every top-level declaration
+newlines-between-decls: 1
+
+# Use 4-space indentation instead of 2
+indent-size: 4
+
+# Be less aggressive about breaking up do-notation
+respectful: true
