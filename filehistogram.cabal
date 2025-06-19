@@ -29,6 +29,7 @@ library
       FileScanner
       Lib
       Logging
+      ProgressIndicator
   other-modules:
       Paths_filehistogram
   autogen-modules:
