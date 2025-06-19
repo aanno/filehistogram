@@ -9,6 +9,8 @@ module FileHistogram
     , main
     ) where
 
+import System.IO (openFile, hClose, IOMode(WriteMode))
+import Data.Maybe (isJust)
 import qualified Data.Text.Lazy as TL
 import qualified Data.Text as T
 import qualified Graphics.Vega.VegaLite as VL
@@ -228,39 +230,85 @@ getOpenCommand
     | otherwise = "xdg-open"                 -- Linux/Unix
 
 -- | Parse command line arguments
-parseArgs :: [String] -> IO (FilePath, FilePath, ProcessingMode, Bool)
+parseArgs :: [String] -> IO (FilePath, FilePath, ProcessingMode, Bool, LogLevel, Maybe FilePath)
 parseArgs [] = do
-    logError "No arguments provided"
-    putStrLn "Usage: file-histogram <directory> [-o <output-file>] [--traditional|--streaming] [--no-progress]"
-    putStrLn "  <directory>         Directory to analyze"
-    putStrLn "  -o <output-file>    Output HTML file (default: file_size_histogram.html)"
-    putStrLn "  --traditional       Use traditional processing (collect all then process)"
-    putStrLn "  --streaming         Use streaming processing"
-    putStrLn "  --no-progress       Disable progress indicators"
+    putStrLn "Usage: file-histogram <directory> [OPTIONS]"
+    putStrLn "  <directory>                Directory to analyze"
     putStrLn ""
-    putStrLn "Default: Incremental streaming with progress indicators (fastest and most memory efficient)"
+    putStrLn "Options:"
+    putStrLn "  -o, --output <file>        Output HTML file (default: file_size_histogram.html)"
+    putStrLn "  --traditional              Use traditional processing (collect all then process)"
+    putStrLn "  --streaming                Use streaming processing"
+    putStrLn "  --incremental              Use incremental processing (default)"
+    putStrLn "  --no-progress              Disable progress indicators"
+    putStrLn "  --log-level <level>        Set log level: DEBUG, INFO, WARN, ERROR (default: INFO)"
+    putStrLn "  --log-file <file>          Write logs to file (default: stderr)"
+    putStrLn "  --help                     Show this help"
     exitFailure
-parseArgs args = parseArgsRec args "" "file_size_histogram.html" IncrementalMode True
+parseArgs args = parseArgsRec args "" "file_size_histogram.html" IncrementalMode True INFO Nothing
   where
-    parseArgsRec [] "" _ _ _ = do
+    parseArgsRec [] "" _ _ _ _ _ = do
         logError "No directory specified"
         exitFailure
-    parseArgsRec [] dir output mode progress = return (dir, output, mode, progress)
-    parseArgsRec ("--traditional":rest) dir output _ progress = 
-        parseArgsRec rest dir output TraditionalMode progress
-    parseArgsRec ("--streaming":rest) dir output _ progress = 
-        parseArgsRec rest dir output StreamingMode progress
-    parseArgsRec ("--incremental":rest) dir output _ progress = 
-        parseArgsRec rest dir output IncrementalMode progress
-    parseArgsRec ("--no-progress":rest) dir output mode _ = 
-        parseArgsRec rest dir output mode False
-    parseArgsRec ("-o":output:rest) dir _ mode progress = 
-        parseArgsRec rest dir output mode progress
-    parseArgsRec (dir:rest) "" output mode progress = 
-        parseArgsRec rest dir output mode progress
-    parseArgsRec (unknown:_) _ _ _ _ = do
-        logError $ "Unknown argument: " ++ unknown
+    parseArgsRec [] dir output mode progress logLevel logFile = 
+        return (dir, output, mode, progress, logLevel, logFile)
+    parseArgsRec ("--traditional":rest) dir output _ progress logLevel logFile = 
+        parseArgsRec rest dir output TraditionalMode progress logLevel logFile
+    parseArgsRec ("--streaming":rest) dir output _ progress logLevel logFile = 
+        parseArgsRec rest dir output StreamingMode progress logLevel logFile
+    parseArgsRec ("--incremental":rest) dir output _ progress logLevel logFile = 
+        parseArgsRec rest dir output IncrementalMode progress logLevel logFile
+    parseArgsRec ("--no-progress":rest) dir output mode _ logLevel logFile = 
+        parseArgsRec rest dir output mode False logLevel logFile
+    parseArgsRec ("--log-level":level:rest) dir output mode progress _ logFile = 
+        case parseLogLevel level of
+            Just lvl -> parseArgsRec rest dir output mode progress lvl logFile
+            Nothing -> do
+                putStrLn $ "Invalid log level: " ++ level ++ ". Use DEBUG, INFO, WARN, or ERROR"
+                exitFailure
+    parseArgsRec ("--log-file":file:rest) dir output mode progress logLevel _ = 
+        parseArgsRec rest dir output mode progress logLevel (Just file)
+    parseArgsRec ("-o":output:rest) dir _ mode progress logLevel logFile = 
+        parseArgsRec rest dir output mode progress logLevel logFile
+    parseArgsRec ("--output":output:rest) dir _ mode progress logLevel logFile = 
+        parseArgsRec rest dir output mode progress logLevel logFile
+    parseArgsRec ("--help":_) _ _ _ _ _ _ = do
+        putStrLn "file-histogram - Generate file size histograms"
+        putStrLn ""
+        putStrLn "Usage: file-histogram <directory> [OPTIONS]"
+        putStrLn ""
+        putStrLn "Arguments:"
+        putStrLn "  <directory>                Directory to analyze"
+        putStrLn ""
+        putStrLn "Options:"
+        putStrLn "  -o, --output <file>        Output HTML file (default: file_size_histogram.html)"
+        putStrLn "  --traditional              Use traditional processing (collect all then process)"
+        putStrLn "  --streaming                Use streaming processing"
+        putStrLn "  --incremental              Use incremental processing (default, fastest)"
+        putStrLn "  --no-progress              Disable progress indicators"
+        putStrLn "  --log-level <level>        Set log level: DEBUG, INFO, WARN, ERROR (default: INFO)"
+        putStrLn "  --log-file <file>          Write logs to file (default: stderr)"
+        putStrLn "  --help                     Show this help"
+        putStrLn ""
+        putStrLn "Examples:"
+        putStrLn "  file-histogram /usr/lib64"
+        putStrLn "  file-histogram /home/user --log-level DEBUG --log-file scan.log"
+        putStrLn "  file-histogram /data --traditional --no-progress"
+        exitSuccess
+    parseArgsRec (dir:rest) "" output mode progress logLevel logFile = 
+        parseArgsRec rest dir output mode progress logLevel logFile
+    parseArgsRec (unknown:_) _ _ _ _ _ _ = do
+        putStrLn $ "Unknown argument: " ++ unknown
+        putStrLn "Use --help for usage information"
         exitFailure
+
+-- | Parse log level from string
+parseLogLevel :: String -> Maybe LogLevel
+parseLogLevel "DEBUG" = Just DEBUG
+parseLogLevel "INFO" = Just INFO
+parseLogLevel "WARN" = Just WARN
+parseLogLevel "ERROR" = Just ERROR
+parseLogLevel _ = Nothing
 
 -- | Processing modes
 data ProcessingMode = TraditionalMode | StreamingMode | IncrementalMode
@@ -271,8 +319,8 @@ fileHistogramCli :: IO ()
 fileHistogramCli = do
     args <- getArgs
     logDebug $ "Command line arguments: " ++ show args
-    (inputPath, outputPath, mode, enableProgressIndicators) <- parseArgs args
-    
+    (inputPath, outputPath, mode, enableProgressIndicators, logLevel, logFile) <- parseArgs args
+
     logInfo $ "Input directory: " ++ inputPath
     logInfo $ "Output file: " ++ outputPath
     logInfo $ "Processing mode: " ++ show mode
