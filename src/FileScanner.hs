@@ -12,6 +12,7 @@ module FileScanner
 
 import Control.Exception (try, IOException)
 import Control.Monad.IO.Class (liftIO, MonadIO)
+import Control.Monad (when)
 import System.Directory
 import System.FilePath
 import qualified Data.Set as Set
@@ -79,28 +80,27 @@ scanWorkQueue opts (work:restWork) =
     S.concatEffect $ do
         let WorkItem currentPath visited depth = work
         
-        -- Check depth limit
+        -- Check depth limit first
         case maxDepth opts of
             Just maxD | depth > maxD -> do
-                logDebug $ "Max depth reached, skipping: " ++ currentPath
+                logDebug $ "Max depth " ++ show maxD ++ " reached, skipping: " ++ currentPath
                 return $ scanWorkQueue opts restWork
             _ -> do
-                logDebug $ "Scanning directory: " ++ currentPath
+                logDebug $ "Scanning directory (depth " ++ show depth ++ "): " ++ currentPath
                 
-                -- Check for cycles
-                canonResult <- liftIO $ try (canonicalizePath currentPath)
-                case canonResult of
-                    Left ex -> do
-                        logWarn $ "Cannot canonicalize " ++ currentPath ++ ": " ++ show (ex :: IOException)
+                -- Path should already be canonicalized, but check for cycles
+                if Set.member currentPath visited
+                    then do
+                        logWarn $ "Cycle detected (already visited), skipping: " ++ currentPath
                         return $ scanWorkQueue opts restWork
-                    Right canonPath -> do
-                        if Set.member canonPath visited
+                    else do
+                        let newVisited = Set.insert currentPath visited
+                        -- Add depth limit check for very deep structures
+                        if depth > 50  -- Emergency depth limit to prevent runaway recursion
                             then do
-                                logWarn $ "Cycle detected, skipping: " ++ canonPath
+                                logWarn $ "Emergency depth limit (50) reached, skipping: " ++ currentPath
                                 return $ scanWorkQueue opts restWork
-                            else do
-                                let newVisited = Set.insert canonPath visited
-                                processDirectory opts currentPath newVisited depth restWork
+                            else processDirectory opts currentPath newVisited depth restWork
 
 -- | Process a directory and return combined stream
 processDirectory :: MonadIO m => ScanOptions -> FilePath -> Set.Set FilePath -> Int -> [WorkItem] -> m (Stream m FileInfo)
@@ -111,8 +111,17 @@ processDirectory opts dirPath visited depth restWork = do
             logWarn $ "Cannot read directory " ++ dirPath ++ ": " ++ show (ex :: IOException)
             return $ scanWorkQueue opts restWork
         Right contents -> do
+            -- Limit number of items per directory to prevent memory issues
+            let limitedContents = if length contents > 10000 
+                                 then take 10000 contents
+                                 else contents
+            
+            -- Log warning if we had to limit
+            when (length contents > 10000) $ 
+                logWarn $ "Directory has " ++ show (length contents) ++ " items, limiting to first 10000: " ++ dirPath
+            
             -- Process all items and collect results
-            (fileInfos, newWorkItems) <- processAllItems opts dirPath visited depth contents
+            (fileInfos, newWorkItems) <- processAllItems opts dirPath visited depth limitedContents
             
             -- Combine file results with continued processing
             let fileStream = S.fromList fileInfos
@@ -126,7 +135,7 @@ processAllItems :: MonadIO m => ScanOptions -> FilePath -> Set.Set FilePath -> I
 processAllItems opts dirPath visited depth items = 
     processItemsAcc opts dirPath visited depth items [] []
 
--- | Accumulator-based processing (tail recursive)
+-- | Accumulator-based processing (tail recursive) - FIXED CYCLE DETECTION
 processItemsAcc :: MonadIO m => ScanOptions -> FilePath -> Set.Set FilePath -> Int -> [String] -> [FileInfo] -> [WorkItem] -> m ([FileInfo], [WorkItem])
 processItemsAcc _opts _dirPath _visited _depth [] fileAcc workAcc = 
     return (reverse fileAcc, reverse workAcc)
@@ -157,19 +166,32 @@ processItemsAcc opts dirPath visited depth (item:remainingItems) fileAcc workAcc
                             processItemsAcc opts dirPath visited depth remainingItems fileAcc workAcc
                 else if isDir
                     then do
-                        -- Process directory
-                        shouldCross <- shouldCrossFilesystemBoundary
-                                       (crossMountBoundaries opts)
-                                       fullPath
-                                       dirPath
-                        if shouldCross
-                            then do
-                                -- Add directory to work queue
-                                let newWork = WorkItem fullPath visited (depth + 1)
-                                processItemsAcc opts dirPath visited depth remainingItems fileAcc (newWork:workAcc)
-                            else do
-                                logWarn $ "Skipping potential mount boundary: " ++ fullPath
+                        -- FIXED: Canonicalize the directory path before checking boundaries and cycles
+                        canonResult <- liftIO $ try (canonicalizePath fullPath)
+                        case canonResult of
+                            Left ex -> do
+                                logWarn $ "Cannot canonicalize directory " ++ fullPath ++ ": " ++ show (ex :: IOException)
                                 processItemsAcc opts dirPath visited depth remainingItems fileAcc workAcc
+                            Right canonPath -> do
+                                -- Check if we've already visited this canonical path
+                                if Set.member canonPath visited
+                                    then do
+                                        logWarn $ "Cycle detected (canonical path already visited), skipping: " ++ canonPath
+                                        processItemsAcc opts dirPath visited depth remainingItems fileAcc workAcc
+                                    else do
+                                        -- Check filesystem boundaries using canonical path
+                                        shouldCross <- shouldCrossFilesystemBoundary
+                                                       (crossMountBoundaries opts)
+                                                       canonPath
+                                                       dirPath
+                                        if shouldCross
+                                            then do
+                                                -- Add directory to work queue with canonical path
+                                                let newWork = WorkItem canonPath visited (depth + 1)
+                                                processItemsAcc opts dirPath visited depth remainingItems fileAcc (newWork:workAcc)
+                                            else do
+                                                logInfo $ "Skipping filesystem boundary: " ++ canonPath
+                                                processItemsAcc opts dirPath visited depth remainingItems fileAcc workAcc
                     else do
                         logDebug $ "Skipping special file: " ++ fullPath
                         processItemsAcc opts dirPath visited depth remainingItems fileAcc workAcc
@@ -180,23 +202,11 @@ getFileInfoSafe filePath = do
     result <- liftIO $ try (getFileSize filePath)
     case result of
         Left ex -> do
-            logWarn $ "Cannot get size of file " ++ filePath ++ ": " ++ show (ex :: IOException)
+            logDebug $ "Cannot get size of file " ++ filePath ++ ": " ++ show (ex :: IOException)
             return Nothing
         Right size -> do
             logDebug $ "File: " ++ filePath ++ " -> " ++ show size ++ " bytes"
             return $ Just $ FileInfo filePath size
-
--- | Simple cross-platform mount boundary check
-checkSameFileSystem :: MonadIO m => FilePath -> FilePath -> m Bool
-checkSameFileSystem path1 path2 = do
-    let drive1 = take 1 $ dropWhile (== pathSeparator) path1
-        drive2 = take 1 $ dropWhile (== pathSeparator) path2
-    
-    if drive1 /= drive2
-        then do
-            logDebug $ "Different drives detected: " ++ drive1 ++ " vs " ++ drive2
-            return False
-        else return True
 
 -- | NEW: Streaming version that returns Stream of Integers (for FileHistogram)
 getFileSizesStream :: MonadIO m => ScanOptions -> FilePath -> Stream m Integer
