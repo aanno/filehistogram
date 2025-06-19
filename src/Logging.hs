@@ -15,6 +15,9 @@ module Logging
     , withLogging
     , setLogLevel
     , getLogLevel
+    -- Export internal functions for debugging
+    , writeLogEntry
+    , globalLogConfig
     ) where
 
 import Control.Monad.IO.Class (liftIO, MonadIO)
@@ -24,10 +27,11 @@ import Control.Concurrent.Async
 import System.IO (hPutStrLn, stderr, Handle)
 import Data.Time (getCurrentTime, formatTime, defaultTimeLocale, UTCTime)
 import qualified Streamly.Data.Stream.Prelude as S
-import qualified Streamly.Data.Fold as Fold
 import Streamly.Data.Stream (Stream)
 import Data.IORef
 import System.IO.Unsafe (unsafePerformIO)
+-- Required imports for Fold
+import qualified Streamly.Data.Fold as Fold
 
 -- | Log levels in order of severity
 data LogLevel = DEBUG | INFO | WARN | ERROR deriving (Show, Eq, Ord)
@@ -46,7 +50,7 @@ data LogConfig = LogConfig
     , logHandle :: Handle
     , enableAsync :: Bool
     , bufferSize :: Int
-    , enableConsole :: Bool  -- New: whether to also log to console
+    , enableConsole :: Bool  -- Whether to also log to console
     } deriving (Eq)
 
 -- | Default logging configuration
@@ -56,13 +60,13 @@ defaultLogConfig = LogConfig
     , logHandle = stderr
     , enableAsync = True
     , bufferSize = 100
-    , enableConsole = True  -- Default: log to both file and console
+    , enableConsole = False  -- CHANGED: Default to no console output
     }
 
 -- Global logging state
 {-# NOINLINE globalLogQueue #-}
 globalLogQueue :: TBQueue LogEntry
-globalLogQueue = unsafePerformIO $ newTBQueueIO 50000  -- Much larger queue
+globalLogQueue = unsafePerformIO $ newTBQueueIO 50000  -- Large queue
 
 {-# NOINLINE globalLogConfig #-}
 globalLogConfig :: IORef LogConfig
@@ -124,11 +128,11 @@ writeLogEntry config entry = do
     -- Always write to the configured handle (file)
     hPutStrLn (logHandle config) formatted
     
-    -- Only write to console/stderr if explicitly enabled
-    when (enableConsole config) $
+    -- Only write to console if explicitly enabled AND handle is stderr
+    when (enableConsole config && logHandle config == stderr) $
         hPutStrLn stderr formatted
 
--- | Main logging function
+-- | Main logging function - FULLY ENABLED
 logMessage :: MonadIO m => LogLevel -> String -> m ()
 logMessage level msg = liftIO $ do
     config <- readIORef globalLogConfig
@@ -138,7 +142,6 @@ logMessage level msg = liftIO $ do
         
         if enableAsync config
             then do
-                -- Try to write to queue with longer timeout
                 result <- atomically $ do
                     full <- isFullTBQueue globalLogQueue
                     if full
@@ -147,7 +150,6 @@ logMessage level msg = liftIO $ do
                             writeTBQueue globalLogQueue entry
                             return True
                 when (not result) $
-                    -- If queue is full, fall back to synchronous logging
                     writeLogEntry config entry
             else writeLogEntry config entry
 
@@ -167,23 +169,20 @@ logToStream level = S.mapM $ \msg -> liftIO $ do
 -- | Run an action with logging, cleaning up afterwards
 withLogging :: MonadIO m => LogConfig -> m a -> m a
 withLogging config action = do
-    -- Store old config
-    oldConfig <- liftIO $ readIORef globalLogConfig
-    
-    -- Initialize with new config
+    -- Initialize with new config (don't save old config)
     initLogging config
     
     -- Run the action
     result <- action
     
-    -- Cleanup and restore old config
+    -- Cleanup worker but DON'T restore old config
     liftIO $ do
         -- Stop the log worker
         maybeWorker <- readIORef globalLogWorker
         forM_ maybeWorker cancel
         writeIORef globalLogWorker Nothing
         
-        -- Restore old config
-        writeIORef globalLogConfig oldConfig
+        -- Keep the current config (don't restore old one)
+        -- This prevents console logging from being re-enabled
     
     return result

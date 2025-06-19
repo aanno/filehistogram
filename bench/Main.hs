@@ -4,6 +4,8 @@
 module Main where
 
 import System.Environment (getArgs, withArgs)
+import System.IO (stderr)
+import Logging
 
 -- Import our benchmark modules  
 import qualified LoggingBench as LB
@@ -11,6 +13,16 @@ import qualified FileScannerBench as FSB
 
 main :: IO ()
 main = do
+    -- ALWAYS disable console logging FIRST, before anything else
+    let globalQuietConfig = LogConfig 
+            { minLogLevel = DEBUG  -- Allow all log levels for benchmarks
+            , logHandle = stderr   -- Default handle (will be overridden)
+            , enableAsync = False
+            , bufferSize = 1000
+            , enableConsole = False  -- CRITICAL: Disable console globally
+            }
+    initLogging globalQuietConfig
+    
     args <- getArgs
     case args of
         ["logging"] -> do

@@ -30,15 +30,15 @@ generateMessage size = take size $ cycle "This is a test log message with some c
 -- | Main benchmark suite
 main :: IO ()
 main = do
-    -- IMMEDIATELY disable console logging globally
-    let quietConfig = LogConfig 
-            { minLogLevel = ERROR  -- Only errors
-            , logHandle = stderr   -- Doesn't matter, won't be used
+    -- IMMEDIATELY set global config to disable console output PERMANENTLY
+    let globalQuietConfig = LogConfig 
+            { minLogLevel = ERROR  -- Only critical errors
+            , logHandle = stderr   -- Doesn't matter since enableConsole=False
             , enableAsync = False
             , bufferSize = 1000
-            , enableConsole = False  -- CRITICAL: No console output
+            , enableConsole = False  -- CRITICAL: Disable console globally
             }
-    initLogging quietConfig
+    initLogging globalQuietConfig
     
     withSystemTempFile "bench.log" $ \path1 handle1 -> do
         hClose handle1
