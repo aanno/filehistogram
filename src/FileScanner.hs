@@ -6,6 +6,7 @@ module FileScanner
     , scanFilesStream
     , scanFiles
     , getFileSizes
+    , getFileSizesStream
     , FileInfo(..)
     ) where
 
@@ -40,7 +41,14 @@ data FileInfo = FileInfo
     , fileSize :: Integer
     } deriving (Show, Eq)
 
--- | Scan files and return a stream of file information
+-- | Work item for tail-recursive processing
+data WorkItem = WorkItem
+    { workPath :: FilePath
+    , workVisited :: Set.Set FilePath
+    , workDepth :: Int
+    } deriving (Show)
+
+-- | Scan files and return a stream of file information (TAIL RECURSIVE)
 scanFilesStream :: MonadIO m => ScanOptions -> FilePath -> Stream m FileInfo
 scanFilesStream opts path = 
     S.concatEffect $ do
@@ -58,98 +66,123 @@ scanFilesStream opts path =
                 -- Check if it's a directory
                 isDir <- liftIO $ doesDirectoryExist canonPath
                 if isDir
-                    then return $ scanFilesStreamRecursive opts canonPath Set.empty 0
+                    then return $ scanWorkQueue opts [WorkItem canonPath Set.empty 0]
                     else do
                         logError $ "Path is not a directory: " ++ canonPath
                         return S.nil
 
--- | Recursive file scanning with streaming
-scanFilesStreamRecursive :: MonadIO m => ScanOptions -> FilePath -> Set.Set FilePath -> Int -> Stream m FileInfo
-scanFilesStreamRecursive opts path visited depth =
+-- | Process work queue tail-recursively using Streamly streams
+scanWorkQueue :: MonadIO m => ScanOptions -> [WorkItem] -> Stream m FileInfo
+scanWorkQueue _opts [] = S.nil
+scanWorkQueue opts (work:restWork) = 
     S.concatEffect $ do
+        let WorkItem currentPath visited depth = work
+        
         -- Check depth limit
         case maxDepth opts of
             Just maxD | depth > maxD -> do
-                logDebug $ "Max depth reached, skipping: " ++ path
-                return S.nil
+                logDebug $ "Max depth reached, skipping: " ++ currentPath
+                return $ scanWorkQueue opts restWork
             _ -> do
-                logDebug $ "Scanning directory: " ++ path
+                logDebug $ "Scanning directory: " ++ currentPath
                 
-                -- Check for cycles (important when following symlinks)
-                canonPath <- liftIO $ try (canonicalizePath path)
-                case canonPath of
+                -- Check for cycles
+                canonResult <- liftIO $ try (canonicalizePath currentPath)
+                case canonResult of
                     Left ex -> do
-                        logWarn $ "Cannot canonicalize " ++ path ++ ": " ++ show (ex :: IOException)
-                        return S.nil
-                    Right canon -> do
-                        if Set.member canon visited
+                        logWarn $ "Cannot canonicalize " ++ currentPath ++ ": " ++ show (ex :: IOException)
+                        return $ scanWorkQueue opts restWork
+                    Right canonPath -> do
+                        if Set.member canonPath visited
                             then do
-                                logWarn $ "Cycle detected, skipping: " ++ canon
-                                return S.nil
+                                logWarn $ "Cycle detected, skipping: " ++ canonPath
+                                return $ scanWorkQueue opts restWork
                             else do
-                                let newVisited = Set.insert canon visited
-                                return $ scanDirectoryStream opts canon newVisited depth
+                                let newVisited = Set.insert canonPath visited
+                                processDirectory opts currentPath newVisited depth restWork
 
--- | Scan a single directory with streaming
-scanDirectoryStream :: MonadIO m => ScanOptions -> FilePath -> Set.Set FilePath -> Int -> Stream m FileInfo
-scanDirectoryStream opts path visited depth =
-    S.concatEffect $ do
-        contentsResult <- liftIO $ try (listDirectory path)
-        case contentsResult of
-            Left ex -> do
-                logWarn $ "Cannot read directory " ++ path ++ ": " ++ show (ex :: IOException)
-                return S.nil
-            Right contents -> do
-                return $ S.concatMap (\item -> 
-                    let fullPath = path </> item
-                    in processItemStream opts fullPath visited depth) 
-                    (S.fromList contents)
+-- | Process a directory and return combined stream
+processDirectory :: MonadIO m => ScanOptions -> FilePath -> Set.Set FilePath -> Int -> [WorkItem] -> m (Stream m FileInfo)
+processDirectory opts dirPath visited depth restWork = do
+    contentsResult <- liftIO $ try (listDirectory dirPath)
+    case contentsResult of
+        Left ex -> do
+            logWarn $ "Cannot read directory " ++ dirPath ++ ": " ++ show (ex :: IOException)
+            return $ scanWorkQueue opts restWork
+        Right contents -> do
+            -- Process all items and collect results
+            (fileInfos, newWorkItems) <- processAllItems opts dirPath visited depth contents
+            
+            -- Combine file results with continued processing
+            let fileStream = S.fromList fileInfos
+                remainingWork = newWorkItems ++ restWork
+                continuationStream = scanWorkQueue opts remainingWork
+            
+            return $ S.append fileStream continuationStream
 
--- | Process a single file or directory item (streaming version)
-processItemStream :: MonadIO m => ScanOptions -> FilePath -> Set.Set FilePath -> Int -> Stream m FileInfo
-processItemStream opts fullPath visited depth =
-    S.concatEffect $ do
-        -- Check if it's a symbolic link
-        isLink <- liftIO $ pathIsSymbolicLink fullPath
-        
-        if isLink && not (followSymlinks opts)
-            then do
-                logDebug $ "Skipping symbolic link: " ++ fullPath
-                return S.nil
-            else do
-                -- Check if it's a file or directory
-                isFile <- liftIO $ doesFileExist fullPath
-                isDir <- liftIO $ doesDirectoryExist fullPath
-                
-                if isFile
-                    then return $ getFileInfoStream fullPath
-                    else if isDir
-                        then do
-                            shouldCross <- if crossMountBoundaries opts
-                                then return True
-                                else checkSameFileSystem fullPath (takeDirectory fullPath)
-                            
-                            if shouldCross
-                                then return $ scanFilesStreamRecursive opts fullPath visited (depth + 1)
-                                else do
-                                    logWarn $ "Skipping potential mount boundary: " ++ fullPath
-                                    return S.nil
-                        else do
-                            logDebug $ "Skipping special file: " ++ fullPath
-                            return S.nil
+-- | Process all items in a directory (non-streaming, but efficient)
+processAllItems :: MonadIO m => ScanOptions -> FilePath -> Set.Set FilePath -> Int -> [String] -> m ([FileInfo], [WorkItem])
+processAllItems opts dirPath visited depth items = 
+    processItemsAcc opts dirPath visited depth items [] []
 
--- | Get file information safely (streaming version)
-getFileInfoStream :: MonadIO m => FilePath -> Stream m FileInfo
-getFileInfoStream path =
-    S.concatEffect $ do
-        result <- liftIO $ try (getFileSize path)
-        case result of
-            Left ex -> do
-                logWarn $ "Cannot get size of file " ++ path ++ ": " ++ show (ex :: IOException)
-                return S.nil
-            Right size -> do
-                logDebug $ "File: " ++ path ++ " -> " ++ show size ++ " bytes"
-                return $ S.fromPure $ FileInfo path size
+-- | Accumulator-based processing (tail recursive)
+processItemsAcc :: MonadIO m => ScanOptions -> FilePath -> Set.Set FilePath -> Int -> [String] -> [FileInfo] -> [WorkItem] -> m ([FileInfo], [WorkItem])
+processItemsAcc _opts _dirPath _visited _depth [] fileAcc workAcc = 
+    return (reverse fileAcc, reverse workAcc)
+
+processItemsAcc opts dirPath visited depth (item:remainingItems) fileAcc workAcc = do
+    let fullPath = dirPath </> item
+    
+    -- Check if it's a symbolic link
+    isLink <- liftIO $ pathIsSymbolicLink fullPath
+    
+    if isLink && not (followSymlinks opts)
+        then do
+            logDebug $ "Skipping symbolic link: " ++ fullPath
+            processItemsAcc opts dirPath visited depth remainingItems fileAcc workAcc
+        else do
+            -- Check if it's a file or directory
+            isFile <- liftIO $ doesFileExist fullPath
+            isDir <- liftIO $ doesDirectoryExist fullPath
+            
+            if isFile
+                then do
+                    -- Process file
+                    maybeFileInfo <- getFileInfoSafe fullPath
+                    case maybeFileInfo of
+                        Just fileInfo -> 
+                            processItemsAcc opts dirPath visited depth remainingItems (fileInfo:fileAcc) workAcc
+                        Nothing -> 
+                            processItemsAcc opts dirPath visited depth remainingItems fileAcc workAcc
+                else if isDir
+                    then do
+                        shouldCross <- if crossMountBoundaries opts
+                            then return True
+                            else checkSameFileSystem fullPath dirPath
+                        
+                        if shouldCross
+                            then do
+                                -- Add directory to work queue
+                                let newWork = WorkItem fullPath visited (depth + 1)
+                                processItemsAcc opts dirPath visited depth remainingItems fileAcc (newWork:workAcc)
+                            else do
+                                logWarn $ "Skipping potential mount boundary: " ++ fullPath
+                                processItemsAcc opts dirPath visited depth remainingItems fileAcc workAcc
+                    else do
+                        logDebug $ "Skipping special file: " ++ fullPath
+                        processItemsAcc opts dirPath visited depth remainingItems fileAcc workAcc
+
+-- | Get file information safely
+getFileInfoSafe :: MonadIO m => FilePath -> m (Maybe FileInfo)
+getFileInfoSafe filePath = do
+    result <- liftIO $ try (getFileSize filePath)
+    case result of
+        Left ex -> do
+            logWarn $ "Cannot get size of file " ++ filePath ++ ": " ++ show (ex :: IOException)
+            return Nothing
+        Right size -> do
+            logDebug $ "File: " ++ filePath ++ " -> " ++ show size ++ " bytes"
+            return $ Just $ FileInfo filePath size
 
 -- | Simple cross-platform mount boundary check
 checkSameFileSystem :: MonadIO m => FilePath -> FilePath -> m Bool
@@ -163,6 +196,11 @@ checkSameFileSystem path1 path2 = do
             return False
         else return True
 
+-- | NEW: Streaming version that returns Stream of Integers (for FileHistogram)
+getFileSizesStream :: MonadIO m => ScanOptions -> FilePath -> Stream m Integer
+getFileSizesStream opts path = 
+    S.mapM (return . fileSize) $ scanFilesStream opts path
+
 -- | Scan files and collect all results (non-streaming version for backward compatibility)
 scanFiles :: MonadIO m => ScanOptions -> FilePath -> m [FileInfo]
 scanFiles opts path = do
@@ -170,8 +208,9 @@ scanFiles opts path = do
     logInfo $ "Scan completed. Found " ++ show (length files) ++ " files"
     return files
 
--- | Convenience function that just returns file sizes (for backward compatibility)
+-- | UPDATED: Now uses streaming version internally
 getFileSizes :: MonadIO m => ScanOptions -> FilePath -> m [Integer]
 getFileSizes opts path = do
-    files <- scanFiles opts path
-    return $ map fileSize files
+    sizes <- S.fold Fold.toList $ getFileSizesStream opts path
+    logInfo $ "Collected " ++ show (length sizes) ++ " file sizes"
+    return sizes
