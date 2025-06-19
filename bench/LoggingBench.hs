@@ -4,7 +4,6 @@ import Gauge
 import Control.Monad (replicateM_, forM_, replicateM)
 import Control.Monad.IO.Class (liftIO)
 import Control.Concurrent.Async
-import Control.Concurrent (threadDelay)
 import System.IO (withFile, IOMode(..), hClose, stderr)
 import System.IO.Temp (withSystemTempFile)
 
@@ -30,10 +29,10 @@ generateMessage size = take size $ cycle "This is a test log message with some c
 -- | Main benchmark suite
 main :: IO ()
 main = do
-    -- IMMEDIATELY set global config to disable console output PERMANENTLY
+    -- Set global config to disable console but allow INFO level logging
     let globalQuietConfig = LogConfig 
-            { minLogLevel = ERROR  -- Only critical errors
-            , logHandle = stderr   -- Doesn't matter since enableConsole=False
+            { minLogLevel = DEBUG  -- Allow all log levels for benchmarks
+            , logHandle = stderr   -- Default handle (will be overridden by withLogging)
             , enableAsync = False
             , bufferSize = 1000
             , enableConsole = False  -- CRITICAL: Disable console globally
@@ -44,105 +43,128 @@ main = do
         hClose handle1
         withSystemTempFile "bench-concurrent.log" $ \path2 handle2 -> do
             hClose handle2
-            
-            let mediumConfig = mediumLoad
-                msg = generateMessage (messageSize mediumConfig)
-                largeMsg = generateMessage 1000
+            withSystemTempFile "bench-levels.log" $ \path3 handle3 -> do
+                hClose handle3
                 
-            defaultMain
-                [ bgroup "Sync vs Async Performance"
-                    [ bench "sync logging" $ nfIO $ do
-                        withFile path1 WriteMode $ \h -> do
-                            let syncConfig = defaultLogConfig 
-                                    { enableAsync = False
-                                    , logHandle = h
-                                    , minLogLevel = INFO
-                                    }
-                            withLogging syncConfig $ do
-                                replicateM_ 1000 $ logInfo msg  -- Reduced from mediumConfig
-                    
-                    , bench "async logging" $ nfIO $ do
-                        withFile path1 WriteMode $ \h -> do
-                            let asyncConfig = defaultLogConfig 
-                                    { enableAsync = True
-                                    , logHandle = h
-                                    , minLogLevel = INFO
-                                    , bufferSize = 10000  -- Increased buffer size
-                                    }
-                            withLogging asyncConfig $ do
-                                replicateM_ 1000 $ logInfo msg  -- Reduced from mediumConfig
-                                -- Add delay to let queue drain
-                                liftIO $ threadDelay 100000  -- 100ms
-                    ]
+                let mediumConfig = mediumLoad
+                    msg = generateMessage (messageSize mediumConfig)
+                    largeMsg = generateMessage 1000
                 
-                , bgroup "Concurrent Logging"
-                    [ bench "single thread" $ nfIO $ do
-                        withFile path2 WriteMode $ \h -> do
-                            let logConfig = defaultLogConfig 
-                                    { enableAsync = False  -- Use sync to avoid queue issues
-                                    , logHandle = h
-                                    , minLogLevel = INFO
-                                    }
-                            withLogging logConfig $ do
-                                replicateM_ 2000 $ logInfo msg
+                defaultMain
+                    [ bgroup "Sync vs Async Performance"
+                        [ bench "sync logging" $ nfIO $ do
+                            withFile path1 WriteMode $ \h -> do
+                                let syncConfig = LogConfig 
+                                        { enableAsync = False
+                                        , logHandle = h
+                                        , minLogLevel = INFO
+                                        , bufferSize = 1000
+                                        , enableConsole = False
+                                        }
+                                withLogging syncConfig $ do
+                                    replicateM_ 1000 $ logInfo msg
+                        
+                        , bench "async logging" $ nfIO $ do
+                            withFile path1 WriteMode $ \h -> do
+                                let asyncConfig = LogConfig 
+                                        { enableAsync = True
+                                        , logHandle = h
+                                        , minLogLevel = INFO
+                                        , bufferSize = 10000
+                                        , enableConsole = False
+                                        }
+                                withLogging asyncConfig $ do
+                                    replicateM_ 1000 $ logInfo msg
+                        ]
                     
-                    , bench "multiple threads" $ nfIO $ do
-                        withFile path2 WriteMode $ \h -> do
-                            let logConfig = defaultLogConfig 
-                                    { enableAsync = False  -- Use sync to avoid queue overflow
-                                    , logHandle = h
-                                    , minLogLevel = INFO
-                                    }
-                            withLogging logConfig $ do
-                                let msgsPerThread = 200
-                                asyncs <- replicateM 2 $ async $ do
-                                    replicateM_ msgsPerThread $ logInfo msg
-                                mapM_ wait asyncs
-                    ]
-                
-                , bgroup "Log Level Filtering"
-                    [ bench "all levels (DEBUG)" $ nfIO $ do
-                        let logConfig = defaultLogConfig 
-                                { enableAsync = False  -- Use sync for predictable performance
-                                , minLogLevel = DEBUG
-                                }
-                        withLogging logConfig $ do
-                            forM_ ([1..2000] :: [Int]) $ \i -> do  -- Reduced load
-                                case i `mod` 4 of
-                                    0 -> logDebug msg
-                                    1 -> logInfo msg
-                                    2 -> logWarn msg
-                                    _ -> logError msg
+                    , bgroup "Concurrent Logging"
+                        [ bench "single thread" $ nfIO $ do
+                            withFile path2 WriteMode $ \h -> do
+                                let logConfig = LogConfig 
+                                        { enableAsync = False
+                                        , logHandle = h
+                                        , minLogLevel = INFO
+                                        , bufferSize = 1000
+                                        , enableConsole = False
+                                        }
+                                withLogging logConfig $ do
+                                    replicateM_ 2000 $ logInfo msg
+                        
+                        , bench "multiple threads" $ nfIO $ do
+                            withFile path2 WriteMode $ \h -> do
+                                let logConfig = LogConfig 
+                                        { enableAsync = False
+                                        , logHandle = h
+                                        , minLogLevel = INFO
+                                        , bufferSize = 1000
+                                        , enableConsole = False
+                                        }
+                                withLogging logConfig $ do
+                                    let msgsPerThread = 200
+                                    asyncs <- replicateM 2 $ async $ do
+                                        replicateM_ msgsPerThread $ logInfo msg
+                                    mapM_ wait asyncs
+                        ]
                     
-                    , bench "filtered (ERROR only)" $ nfIO $ do
-                        let logConfig = defaultLogConfig 
-                                { enableAsync = False  -- Use sync for predictable performance
-                                , minLogLevel = ERROR
-                                }
-                        withLogging logConfig $ do
-                            forM_ ([1..2000] :: [Int]) $ \i -> do  -- Reduced load
-                                case i `mod` 4 of
-                                    0 -> logDebug msg
-                                    1 -> logInfo msg
-                                    2 -> logWarn msg
-                                    _ -> logError msg
-                    ]
-                
-                , bgroup "Memory Usage"
-                    [ bench "many small messages" $ nfIO $ do
-                        let logConfig = defaultLogConfig 
-                                { enableAsync = False  -- Use sync to avoid queue issues
-                                , minLogLevel = INFO
-                                }
-                        withLogging logConfig $ do
-                            replicateM_ 5000 $ logInfo msg  -- Reduced load
+                    , bgroup "Log Level Filtering"
+                        [ bench "all levels (DEBUG)" $ nfIO $ do
+                            withFile path3 WriteMode $ \h -> do
+                                let logConfig = LogConfig 
+                                        { enableAsync = False
+                                        , logHandle = h
+                                        , minLogLevel = DEBUG
+                                        , bufferSize = 1000
+                                        , enableConsole = False
+                                        }
+                                withLogging logConfig $ do
+                                    forM_ ([1..2000] :: [Int]) $ \i -> do
+                                        case i `mod` 4 of
+                                            0 -> logDebug msg
+                                            1 -> logInfo msg
+                                            2 -> logWarn msg
+                                            _ -> logError msg
+                        
+                        , bench "filtered (ERROR only)" $ nfIO $ do
+                            withFile path3 WriteMode $ \h -> do
+                                let logConfig = LogConfig 
+                                        { enableAsync = False
+                                        , logHandle = h
+                                        , minLogLevel = ERROR
+                                        , bufferSize = 1000
+                                        , enableConsole = False
+                                        }
+                                withLogging logConfig $ do
+                                    forM_ ([1..2000] :: [Int]) $ \i -> do
+                                        case i `mod` 4 of
+                                            0 -> logDebug msg
+                                            1 -> logInfo msg
+                                            2 -> logWarn msg
+                                            _ -> logError msg
+                        ]
                     
-                    , bench "few large messages" $ nfIO $ do
-                        let logConfig = defaultLogConfig 
-                                { enableAsync = False  -- Use sync to avoid queue issues
-                                , minLogLevel = INFO
-                                }
-                        withLogging logConfig $ do
-                            replicateM_ 500 $ logInfo largeMsg  -- Reduced load
+                    , bgroup "Memory Usage"
+                        [ bench "many small messages" $ nfIO $ do
+                            withFile path3 WriteMode $ \h -> do
+                                let logConfig = LogConfig 
+                                        { enableAsync = False
+                                        , logHandle = h
+                                        , minLogLevel = INFO
+                                        , bufferSize = 1000
+                                        , enableConsole = False
+                                        }
+                                withLogging logConfig $ do
+                                    replicateM_ 5000 $ logInfo msg
+                        
+                        , bench "few large messages" $ nfIO $ do
+                            withFile path3 WriteMode $ \h -> do
+                                let logConfig = LogConfig 
+                                        { enableAsync = False
+                                        , logHandle = h
+                                        , minLogLevel = INFO
+                                        , bufferSize = 1000
+                                        , enableConsole = False
+                                        }
+                                withLogging logConfig $ do
+                                    replicateM_ 500 $ logInfo largeMsg
+                        ]
                     ]
-                ]
