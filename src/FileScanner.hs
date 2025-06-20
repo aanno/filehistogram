@@ -97,14 +97,9 @@ scanWorkQueue opts (work:restWork) =
                     else do
                         logDebug $ "Scanning directory (depth " ++ show depth ++ "): " ++ currentPath
                         
-                        -- Check for cycles using the visited set
-                        if Set.member currentPathText visited
-                            then do
-                                logWarn $ "Cycle detected (already visited), skipping: " ++ currentPath
-                                return $ scanWorkQueue opts restWork
-                            else do
-                                let newVisited = Set.insert currentPathText visited
-                                processDirectory opts currentPath newVisited depth restWork
+                        -- No need to check visited here - if it's in the work queue, we should process it
+                        -- The visited set is only used to prevent adding duplicates to the queue
+                        processDirectory opts currentPath visited depth restWork
 
 -- | Process a directory and return combined stream
 processDirectory :: MonadIO m => ScanOptions -> FilePath -> Set.Set Text -> Int -> [WorkItem] -> m (Stream m FileInfo)
