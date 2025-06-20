@@ -14,7 +14,7 @@ import Control.Exception (try, IOException)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad (when)
 import System.Directory (canonicalizePath)
-import System.FilePath (normalise)
+import System.FilePath (normalise, addTrailingPathSeparator)
 import qualified Data.Text as T
 import Data.Text (Text)
 import System.Info (os)
@@ -113,21 +113,35 @@ checkMountBoundary path1 path2
         let points = [ words line !! 4 | line <- lines content, length (words line) >= 5 ]
         in take 50 points  -- Limit to prevent performance issues
     
+    -- FIXED: Find the mount point that contains the path (longest matching prefix)
     findMountPoint path mountPoints =
-        let matches = filter (`isPrefixOf` path) (map normalise mountPoints)
-            sorted = sortOn (negate . length) matches  -- Longest first
+        let normalizedMounts = map normalise mountPoints
+            -- Add trailing slash for proper prefix matching
+            pathWithSlash = addTrailingPathSeparator path
+            -- Find mount points that are prefixes of the path
+            matches = filter (\mp -> addTrailingPathSeparator mp `isPrefixOf` pathWithSlash) normalizedMounts
+            -- Sort by length (longest first) to get the most specific mount point
+            sorted = sortOn (negate . length) matches
         in case sorted of
-            [] -> "/"
+            [] -> "/"  -- Default to root if no mount point found
             (first:_) -> first
 
 -- | Comprehensive filesystem boundary detection
 isFileSystemBoundary :: MonadIO m => FilePath -> FilePath -> m Bool
 isFileSystemBoundary path1 path2 = do
-    -- First check device boundary (most reliable)
-    sameDev <- isSameFilesystem path1 path2
-    if not sameDev
-        then return True  -- Different devices = boundary
-        else checkMountBoundary path1 path2  -- Check mount boundaries
+    -- SPECIAL CASE: If paths are the same (after normalization), never a boundary
+    let norm1 = normalise path1
+    let norm2 = normalise path2
+    if norm1 == norm2
+        then do
+            logDebug $ "Same path detected: " ++ norm1 ++ " == " ++ norm2
+            return False
+        else do
+            -- First check device boundary (most reliable)
+            sameDev <- isSameFilesystem path1 path2
+            if not sameDev
+                then return True  -- Different devices = boundary
+                else checkMountBoundary path1 path2  -- Check mount boundaries
 
 -- | Main API: Should we cross this filesystem boundary?
 shouldCrossFilesystemBoundary :: MonadIO m => Bool -> FilePath -> FilePath -> m Bool
