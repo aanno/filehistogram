@@ -33,6 +33,7 @@ dependencies:
 - text >= 2.1.1
 - time >= 1.12.2
 - unix >= 2.8.6.0
+- unordered-containers >= 0.2.20
 - stm
 - async
 - temporary
