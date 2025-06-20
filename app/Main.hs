@@ -1,7 +1,7 @@
 module Main (main) where
 
 -- import Lib
-import FileHistogram (fileHistogramCli)
+import FileHistogramCli (fileHistogramCli)
 
 main :: IO ()
 main = fileHistogramCli
