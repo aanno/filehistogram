@@ -12,7 +12,7 @@ module FileScanner
 
 import Control.Exception (try, IOException)
 import Control.Monad.IO.Class (liftIO, MonadIO)
-import Control.Monad (when)
+import Control.Monad (when, foldM)
 import System.Directory
 import System.FilePath
 import Data.Text (Text)
@@ -142,7 +142,7 @@ processAllItems :: MonadIO m => ScanOptions -> FilePath -> Set.Set Text -> Int -
 processAllItems opts dirPath visited depth itemsSet = 
     processItemsAcc opts dirPath visited depth (Set.toList itemsSet) [] []
 
--- | Accumulator-based processing (tail recursive) - FIXED CYCLE DETECTION
+-- | FIXED: Accumulator-based processing with proper visited set threading
 processItemsAcc :: MonadIO m => ScanOptions -> FilePath -> Set.Set Text -> Int -> [Text] -> [FileInfo] -> [WorkItem] -> m ([FileInfo], [WorkItem])
 processItemsAcc _opts _dirPath _visited _depth [] fileAcc workAcc = 
     return (reverse fileAcc, reverse workAcc)
@@ -188,10 +188,18 @@ processItemsAcc opts dirPath visited depth (item:remainingItems) fileAcc workAcc
                                                dirPath
                                 if shouldCross
                                     then do
-                                        -- Add directory to work queue with canonical path
-                                        -- The cycle detection will happen in scanWorkQueue
-                                        let newWork = WorkItem (T.pack canonPath) visited (depth + 1)
-                                        processItemsAcc opts dirPath visited depth remainingItems fileAcc (newWork:workAcc)
+                                        -- FIXED: Check if we've already visited this canonical path
+                                        let canonPathText = T.pack canonPath
+                                        if Set.member canonPathText visited
+                                            then do
+                                                logWarn $ "Cycle detected: already visited " ++ canonPath
+                                                processItemsAcc opts dirPath visited depth remainingItems fileAcc workAcc
+                                            else do
+                                                -- Add to visited set and create work item
+                                                let newVisited = Set.insert canonPathText visited
+                                                    newWork = WorkItem canonPathText newVisited (depth + 1)
+                                                -- FIXED: Thread the updated visited set through remaining processing
+                                                processItemsAcc opts dirPath newVisited depth remainingItems fileAcc (newWork:workAcc)
                                     else do
                                         logInfo $ "Skipping filesystem boundary: " ++ canonPath
                                         processItemsAcc opts dirPath visited depth remainingItems fileAcc workAcc
