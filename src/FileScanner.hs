@@ -2,7 +2,9 @@
 
 module FileScanner 
     ( ScanOptions(..)
+    , ScanCaches(..)
     , defaultScanOptions
+    , newScanCaches
     , scanFilesStream
     , scanFiles
     , getFileSizes
@@ -15,8 +17,10 @@ import Control.Monad.IO.Class (liftIO, MonadIO)
 import Control.Monad (when)
 import Control.Concurrent.STM
 import Control.Concurrent.Async (mapConcurrently)
-import System.Directory
-import System.FilePath
+import System.OsPath
+import System.OsPath.Types (OsPath)
+import System.Directory.OsPath
+import System.File.OsPath
 import Data.Function ((&))
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -27,7 +31,8 @@ import qualified Streamly.Data.Fold as Fold
 import Streamly.Data.Stream (Stream)
 import qualified Streamly.Data.Stream as Stream
 import Logging
-import MountBoundary (shouldCrossFilesystemBoundary)
+import qualified MountBoundary as MB
+import qualified CannonizedDirectoryCache as CDC
 
 -- | Configuration for file scanning
 data ScanOptions = ScanOptions
@@ -36,6 +41,12 @@ data ScanOptions = ScanOptions
     , maxDepth :: Maybe Int
     , concurrentWorkers :: Int  -- Control concurrency level
     } deriving (Show, Eq)
+
+-- | Caches for optimized scanning
+data ScanCaches = ScanCaches
+    { mountCache :: MB.MountCache
+    , canonCache :: CDC.CannonizedDirectoryCache
+    }
 
 -- | Default scan options (safe defaults)
 defaultScanOptions :: ScanOptions
@@ -46,6 +57,15 @@ defaultScanOptions = ScanOptions
     , concurrentWorkers = 16  -- Higher for I/O bound work
     }
 
+-- | Create new scan caches
+newScanCaches :: MonadIO m => m ScanCaches
+newScanCaches = liftIO $ do
+    mountCache <- MB.newMountCache
+    canonCache <- CDC.newCache
+    -- Pre-populate mount cache
+    MB.refreshMountCache mountCache
+    return $ ScanCaches mountCache canonCache
+
 -- | Information about a scanned file
 data FileInfo = FileInfo
     { filePath :: Text
@@ -53,29 +73,32 @@ data FileInfo = FileInfo
     } deriving (Show, Eq)
 
 -- | Scan files and return a stream of file information
-scanFilesStream :: MonadIO m => ScanOptions -> FilePath -> Stream m FileInfo
-scanFilesStream opts path = 
+scanFilesStream :: MonadIO m => ScanOptions -> ScanCaches -> OsPath -> Stream m FileInfo
+scanFilesStream opts caches path = 
     S.concatEffect $ do
-        logInfo $ "Starting streaming file scan of: " ++ path
+        pathStr <- liftIO $ decodeFS path
+        logInfo $ "Starting streaming file scan of: " ++ pathStr
         
-        -- Canonicalize the path first
-        canonResult <- liftIO $ try (canonicalizePath path)
+        -- Canonicalize the path using cache
+        canonResult <- liftIO $ try (CDC.getCanonicalized (canonCache caches) path)
         case canonResult of
             Left ex -> do
-                logError $ "Cannot canonicalize path " ++ path ++ ": " ++ show (ex :: IOException)
+                logError $ "Cannot canonicalize path " ++ pathStr ++ ": " ++ show (ex :: IOException)
                 return S.nil
             Right canonPath -> do
-                logDebug $ "Canonicalized path: " ++ canonPath
+                canonPathStr <- liftIO $ decodeFS canonPath
+                logDebug $ "Canonicalized path: " ++ canonPathStr
                 
                 -- Check if it's a directory
                 isDir <- liftIO $ doesDirectoryExist canonPath
                 if isDir
                     then do
                         -- Create thread-safe visited set using STM
-                        visitedTVar <- liftIO $ newTVarIO (HashSet.singleton (T.pack canonPath))
+                        canonPathText <- liftIO $ T.pack <$> decodeFS canonPath
+                        visitedTVar <- liftIO $ newTVarIO (HashSet.singleton canonPathText)
                         
                         -- Start directory scan with concurrent processing
-                        return $ scanDirectoryConcurrent opts visitedTVar canonPath 0
+                        return $ scanDirectoryConcurrent opts caches visitedTVar canonPath 0
                     else do
                         -- It's a single file
                         maybeInfo <- getFileInfoSafe canonPath
@@ -84,37 +107,38 @@ scanFilesStream opts path =
                             Nothing -> return S.nil
 
 -- | Scan a directory concurrently, returning a stream of files
-scanDirectoryConcurrent :: MonadIO m => ScanOptions -> TVar (HashSet Text) -> FilePath -> Int -> Stream m FileInfo
-scanDirectoryConcurrent opts visitedTVar dirPath depth =
+scanDirectoryConcurrent :: MonadIO m => ScanOptions -> ScanCaches -> TVar (HashSet Text) -> OsPath -> Int -> Stream m FileInfo
+scanDirectoryConcurrent opts caches visitedTVar dirPath depth =
     -- Check depth limit
     if maybe False (< depth) (maxDepth opts) || depth > 50
         then S.nil
         else
             -- List directory and process items concurrently
             S.concatEffect $ do
-                logDebug $ "Scanning directory (depth " ++ show depth ++ "): " ++ dirPath
+                dirPathStr <- liftIO $ decodeFS dirPath
+                logDebug $ "Scanning directory (depth " ++ show depth ++ "): " ++ dirPathStr
                 contentsResult <- liftIO $ try (listDirectory dirPath)
                 case contentsResult of
                     Left ex -> do
-                        logWarn $ "Cannot read directory " ++ dirPath ++ ": " ++ show (ex :: IOException)
+                        logWarn $ "Cannot read directory " ++ dirPathStr ++ ": " ++ show (ex :: IOException)
                         return S.nil
                     Right contents -> do
                         when (length contents > 10000) $ 
-                            logWarn $ "Large directory with " ++ show (length contents) ++ " items: " ++ dirPath
+                            logWarn $ "Large directory with " ++ show (length contents) ++ " items: " ++ dirPathStr
                         
                         -- Process items with manual concurrency control
-                        return $ processItemsConcurrently opts visitedTVar dirPath depth contents
+                        return $ processItemsConcurrently opts caches visitedTVar dirPath depth contents
 
 -- | Process directory items with concurrency control
-processItemsConcurrently :: MonadIO m => ScanOptions -> TVar (HashSet Text) -> FilePath -> Int -> [String] -> Stream m FileInfo
-processItemsConcurrently opts visitedTVar dirPath depth items =
+processItemsConcurrently :: MonadIO m => ScanOptions -> ScanCaches -> TVar (HashSet Text) -> OsPath -> Int -> [OsPath] -> Stream m FileInfo
+processItemsConcurrently opts caches visitedTVar dirPath depth items =
     -- Process items sequentially but allow each item's processing to be concurrent
     S.fromList items
-        & S.concatMapM (processDirectoryItem opts visitedTVar dirPath depth)
+        & S.concatMapM (processDirectoryItem opts caches visitedTVar dirPath depth)
 
 -- | Process a single directory item
-processDirectoryItem :: MonadIO m => ScanOptions -> TVar (HashSet Text) -> FilePath -> Int -> String -> m (Stream m FileInfo)
-processDirectoryItem opts visitedTVar dirPath depth item = do
+processDirectoryItem :: MonadIO m => ScanOptions -> ScanCaches -> TVar (HashSet Text) -> OsPath -> Int -> OsPath -> m (Stream m FileInfo)
+processDirectoryItem opts caches visitedTVar dirPath depth item = do
     let fullPath = dirPath </> item
     
     -- Check if it's a symbolic link first
@@ -136,30 +160,34 @@ processDirectoryItem opts visitedTVar dirPath depth item = do
                     -- Check if it's a directory
                     isDir <- liftIO $ doesDirectoryExist fullPath
                     if isDir
-                        then processSubdirectory opts visitedTVar dirPath depth fullPath
+                        then processSubdirectory opts caches visitedTVar dirPath depth fullPath
                         else return S.nil
 
 -- | Process a subdirectory
-processSubdirectory :: MonadIO m => ScanOptions -> TVar (HashSet Text) -> FilePath -> Int -> FilePath -> m (Stream m FileInfo)
-processSubdirectory opts visitedTVar parentPath depth fullPath = do
-    -- Canonicalize the directory path
-    canonResult <- liftIO $ try (canonicalizePath fullPath)
+processSubdirectory :: MonadIO m => ScanOptions -> ScanCaches -> TVar (HashSet Text) -> OsPath -> Int -> OsPath -> m (Stream m FileInfo)
+processSubdirectory opts caches visitedTVar parentPath depth fullPath = do
+    -- Canonicalize the directory path using cache
+    canonResult <- liftIO $ try (CDC.getCanonicalized (canonCache caches) fullPath)
     case canonResult of
         Left ex -> do
-            logWarn $ "Cannot canonicalize directory " ++ fullPath ++ ": " ++ show (ex :: IOException)
+            fullPathStr <- liftIO $ decodeFS fullPath
+            logWarn $ "Cannot canonicalize directory " ++ fullPathStr ++ ": " ++ show (ex :: IOException)
             return S.nil
         Right canonPath -> do
-            let canonPathText = T.pack canonPath
+            canonPathText <- liftIO $ T.pack <$> decodeFS canonPath
             
-            -- Check filesystem boundaries
-            shouldCross <- shouldCrossFilesystemBoundary
-                           (crossMountBoundaries opts)
-                           canonPath
-                           parentPath
+            -- Check filesystem boundaries using the mount cache
+            shouldCross <- if crossMountBoundaries opts
+                then return True
+                else do
+                    -- Check if crossing filesystem boundary
+                    crossesBoundary <- liftIO $ MB.isFileSystemBoundary (mountCache caches) parentPath canonPath
+                    return (not crossesBoundary)
             
             if not shouldCross
                 then do
-                    logInfo $ "Skipping filesystem boundary: " ++ canonPath
+                    canonPathStr <- liftIO $ decodeFS canonPath
+                    logInfo $ "Skipping filesystem boundary: " ++ canonPathStr
                     return S.nil
                 else do
                     -- Check if already visited (thread-safe)
@@ -173,39 +201,56 @@ processSubdirectory opts visitedTVar parentPath depth fullPath = do
                     
                     if alreadyVisited
                         then do
-                            logDebug $ "Already visited, skipping: " ++ canonPath
+                            canonPathStr <- liftIO $ decodeFS canonPath
+                            logDebug $ "Already visited, skipping: " ++ canonPathStr
                             return S.nil
                         else
                             -- Recursively scan the subdirectory
-                            return $ scanDirectoryConcurrent opts visitedTVar canonPath (depth + 1)
+                            return $ scanDirectoryConcurrent opts caches visitedTVar canonPath (depth + 1)
 
 -- | Get file information safely
-getFileInfoSafe :: MonadIO m => FilePath -> m (Maybe FileInfo)
+getFileInfoSafe :: MonadIO m => OsPath -> m (Maybe FileInfo)
 getFileInfoSafe filePath = do
     result <- liftIO $ try (getFileSize filePath)
     case result of
         Left ex -> do
-            logDebug $ "Cannot get size of file " ++ filePath ++ ": " ++ show (ex :: IOException)
+            filePathStr <- liftIO $ decodeFS filePath
+            logDebug $ "Cannot get size of file " ++ filePathStr ++ ": " ++ show (ex :: IOException)
             return Nothing
         Right size -> do
-            logDebug $ "File: " ++ filePath ++ " -> " ++ show size ++ " bytes"
-            return $ Just $ FileInfo (T.pack filePath) size
+            filePathStr <- liftIO $ decodeFS filePath
+            filePathText <- liftIO $ T.pack <$> decodeFS filePath
+            logDebug $ "File: " ++ filePathStr ++ " -> " ++ show size ++ " bytes"
+            return $ Just $ FileInfo filePathText size
 
 -- | Get file sizes as a stream
-getFileSizesStream :: MonadIO m => ScanOptions -> FilePath -> Stream m Integer
-getFileSizesStream opts path = 
-    S.mapM (return . fileSize) $ scanFilesStream opts path
+getFileSizesStream :: MonadIO m => ScanOptions -> ScanCaches -> OsPath -> Stream m Integer
+getFileSizesStream opts caches path = 
+    S.mapM (return . fileSize) $ scanFilesStream opts caches path
 
 -- | Scan files and collect all results (non-streaming version)
-scanFiles :: MonadIO m => ScanOptions -> FilePath -> m [FileInfo]
-scanFiles opts path = do
-    files <- S.fold Fold.toList $ scanFilesStream opts path
+scanFiles :: MonadIO m => ScanOptions -> ScanCaches -> OsPath -> m [FileInfo]
+scanFiles opts caches path = do
+    files <- S.fold Fold.toList $ scanFilesStream opts caches path
     logInfo $ "Scan completed. Found " ++ show (length files) ++ " files"
     return files
 
 -- | Get file sizes (non-streaming version)
-getFileSizes :: MonadIO m => ScanOptions -> FilePath -> m [Integer]
-getFileSizes opts path = do
-    sizes <- S.fold Fold.toList $ getFileSizesStream opts path
+getFileSizes :: MonadIO m => ScanOptions -> ScanCaches -> OsPath -> m [Integer]
+getFileSizes opts caches path = do
+    sizes <- S.fold Fold.toList $ getFileSizesStream opts caches path
     logInfo $ "Collected " ++ show (length sizes) ++ " file sizes"
     return sizes
+
+-- | Convenience function to scan with String path (converts to OsPath)
+scanFilesFromString :: MonadIO m => ScanOptions -> ScanCaches -> FilePath -> m [FileInfo]
+scanFilesFromString opts caches pathStr = do
+    osPath <- liftIO $ encodeFS pathStr
+    scanFiles opts caches osPath
+
+-- | Convenience function to scan stream with String path
+scanFilesStreamFromString :: MonadIO m => ScanOptions -> ScanCaches -> FilePath -> Stream m FileInfo
+scanFilesStreamFromString opts caches pathStr = 
+    S.concatEffect $ do
+        osPath <- liftIO $ encodeFS pathStr
+        return $ scanFilesStream opts caches osPath

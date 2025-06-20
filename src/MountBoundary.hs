@@ -1,168 +1,277 @@
-{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE CPP #-}
-{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE OverloadedStrings #-}
 
-module MountBoundary 
-    ( DeviceInfo(..)
-    , getDeviceInfo
-    , isSameFilesystem
-    , isFileSystemBoundary
-    , shouldCrossFilesystemBoundary
-    ) where
+module MountBoundary
+  ( MountCache
+  , newMountCache
+  , refreshMountCache
+  , isFileSystemBoundary
+  , getAllMountPoints
+  , getMountPointFor
+  , clearMountCache
+  ) where
 
-import Control.Exception (try, IOException)
 import Control.Monad.IO.Class (MonadIO, liftIO)
-import Control.Monad (when)
-import System.Directory (canonicalizePath)
-import System.FilePath (normalise, addTrailingPathSeparator)
-import qualified Data.Text as T
-import Data.Text (Text)
-import System.Info (os)
-import Data.List (isPrefixOf, sortOn)
-import Logging
+import Data.IORef
+import Data.List (find, sortOn, isPrefixOf)
+import qualified Data.Set as Set
+import Data.Set (Set)
+import System.OsPath
+import System.OsPath.Types (OsPath)
+import Control.Exception (try, SomeException, handle)
 
 #ifdef mingw32_HOST_OS
-import System.Win32.File (getVolumeNameForVolumeMountPoint)
+import System.OsPath.Windows (encodeUtf)
+import qualified System.Win32.File as Win32
+import qualified System.Win32.Types as Win32
+import Foreign.Marshal.Alloc (allocaBytes)
+import Foreign.Marshal.Array (peekArray)
+import Foreign.Ptr (Ptr, nullPtr)
+import Foreign.C.Types (CULong, CWchar)
+import Foreign.Storable (peek)
+import System.Win32.Utils (try)
 #else
-import System.Posix.Files (getFileStatus, deviceID)
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BS8
+import System.File.OsPath (getFileStatus)
+import System.Directory.OsPath (doesPathExist)
+#ifdef USE_MOUNTPOINTS
+-- Optional: if user wants to use the mountpoints library
+-- import qualified System.MountPoints as MP
+#endif
 #endif
 
--- | Device information for filesystem boundary detection
-data DeviceInfo = DeviceInfo
-    { deviceId :: !Text           -- Device ID (Unix) or Volume GUID (Windows)
-    , mountPoint :: !FilePath     -- Mount point path
-    } deriving (Show, Eq)
+-- Cache for mount points - stores normalized mount paths and their metadata
+data MountInfo = MountInfo
+  { mountPath :: !OsPath
+  , mountDevice :: !String  -- Device identifier for uniqueness check
+  } deriving (Eq, Show)
 
--- | Get device information for a file path
-getDeviceInfo :: MonadIO m => FilePath -> m (Maybe DeviceInfo)
-getDeviceInfo path = liftIO $ do
-    logDebug $ "Getting device info for: " ++ path
-    result <- try $ do
-        canonPath <- canonicalizePath path
-#ifdef mingw32_HOST_OS
-        getWindowsDeviceInfo canonPath
-#else
-        getUnixDeviceInfo canonPath
-#endif
-    case result of
-        Left (_ :: IOException) -> do
-            logWarn $ "Cannot get device info for " ++ path
-            return Nothing
-        Right info -> do
-            logDebug $ "Device info for " ++ path ++ ": " ++ show info
-            return (Just info)
+newtype MountCache = MountCache (IORef (Set MountInfo))
 
-#ifdef mingw32_HOST_OS
--- | Windows-specific device info extraction
-getWindowsDeviceInfo :: FilePath -> IO DeviceInfo
-getWindowsDeviceInfo path = do
-    let volume = take 3 path ++ "\\"
-    volumeGuid <- getVolumeNameForVolumeMountPoint volume
-    return DeviceInfo
-        { deviceId = T.pack volumeGuid
-        , mountPoint = volume
-        }
-#else
--- | Unix-specific device info extraction  
-getUnixDeviceInfo :: FilePath -> IO DeviceInfo
-getUnixDeviceInfo path = do
-    stat <- getFileStatus path
-    let devId = deviceID stat
-    return DeviceInfo
-        { deviceId = T.pack $ show devId
-        , mountPoint = "/"  -- Simplified for now
-        }
-#endif
+-- Create a new mount cache
+newMountCache :: MonadIO m => m MountCache
+newMountCache = liftIO $ MountCache <$> newIORef Set.empty
 
--- | Check if two paths are on the same filesystem
-isSameFilesystem :: MonadIO m => FilePath -> FilePath -> m Bool
-isSameFilesystem path1 path2 = do
-    logDebug $ "Checking if same filesystem: " ++ path1 ++ " vs " ++ path2
-    dev1 <- getDeviceInfo path1
-    dev2 <- getDeviceInfo path2
-    case (dev1, dev2) of
-        (Just d1, Just d2) -> do
-            let same = deviceId d1 == deviceId d2
-            logDebug $ "Device comparison: " ++ show (deviceId d1) ++ " vs " ++ show (deviceId d2) ++ " = " ++ show same
-            return same
-        _ -> do
-            logWarn $ "Cannot determine filesystem boundary between " ++ path1 ++ " and " ++ path2 ++ ", assuming same"
-            return True  -- If we can't determine, assume same filesystem (safer)
+-- Refresh the mount cache by reading current mount points
+refreshMountCache :: MonadIO m => MountCache -> m ()
+refreshMountCache (MountCache cacheRef) = liftIO $ do
+    mountInfos <- getAllMountInfos
+    writeIORef cacheRef (Set.fromList mountInfos)
 
--- | Check for mount boundaries (including bind mounts on Linux)
-checkMountBoundary :: MonadIO m => FilePath -> FilePath -> m Bool
-checkMountBoundary path1 path2
-    | "linux" `T.isInfixOf` T.pack os = liftIO $ do
-        logDebug $ "Checking mount boundary between " ++ path1 ++ " and " ++ path2
-        result <- try $ readFile "/proc/self/mountinfo"
-        case result of
-            Left (_ :: IOException) -> do
-                logWarn "Failed to read /proc/self/mountinfo"
-                return False
-            Right content -> do
-                let mountPoints = extractMountPoints content
-                    mount1 = findMountPoint (normalise path1) mountPoints
-                    mount2 = findMountPoint (normalise path2) mountPoints
-                logDebug $ "Mount points: " ++ mount1 ++ " vs " ++ mount2
-                let boundary = mount1 /= mount2
-                when boundary $ logInfo $ "Mount boundary detected: " ++ mount1 ++ " vs " ++ mount2
-                return boundary
-    | otherwise = return False
+-- Clear the mount cache
+clearMountCache :: MonadIO m => MountCache -> m ()
+clearMountCache (MountCache cacheRef) = liftIO $ writeIORef cacheRef Set.empty
+
+-- Get all mount points for the current platform
+getAllMountPoints :: MonadIO m => m [OsPath]
+getAllMountPoints = liftIO $ do
+    mountInfos <- getAllMountInfos
+    return (map mountPath mountInfos)
+
+-- Internal function to get mount info with device information
+getAllMountInfos :: IO [MountInfo]
+getAllMountInfos = handle handleError getMountInfosPlatform
   where
-    extractMountPoints content = 
-        let points = [ words line !! 4 | line <- lines content, length (words line) >= 5 ]
-        in take 50 points  -- Limit to prevent performance issues
+    handleError :: SomeException -> IO [MountInfo]
+    handleError _ = do
+        -- Fallback: return at least root directory
+        rootPath <- encodeFS "/"
+        return [MountInfo rootPath "unknown"]
+
+-- Platform-specific mount point detection
+getMountInfosPlatform :: IO [MountInfo]
+getMountInfosPlatform = do
+#ifdef mingw32_HOST_OS
+    getWindowsMountInfos
+#else
+    getUnixMountInfos
+#endif
+
+#ifdef mingw32_HOST_OS
+-- Windows implementation using GetLogicalDrives and volume APIs
+getWindowsMountInfos :: IO [MountInfo]
+getWindowsMountInfos = do
+    drives <- Win32.getLogicalDrives
+    let driveLetters = [c : ":\\" | c <- ['A'..'Z'], testBit drives (fromEnum c - fromEnum 'A')]
+    validDrives <- filterM isDriveValid driveLetters
+    mountInfos <- mapM createMountInfo validDrives
+    return mountInfos
+  where
+    testBit :: Win32.DWORD -> Int -> Bool
+    testBit w i = (w `div` (2^i)) `mod` 2 == 1
     
-    -- FIXED: Find the mount point that contains the path (longest matching prefix)
-    findMountPoint path mountPoints =
-        let normalizedMounts = map normalise mountPoints
-            -- Add trailing slash for proper prefix matching
-            pathWithSlash = addTrailingPathSeparator path
-            -- Find mount points that are prefixes of the path
-            matches = filter (\mp -> addTrailingPathSeparator mp `isPrefixOf` pathWithSlash) normalizedMounts
-            -- Sort by length (longest first) to get the most specific mount point
-            sorted = sortOn (negate . length) matches
-        in case sorted of
-            [] -> "/"  -- Default to root if no mount point found
-            (first:_) -> first
+    isDriveValid :: FilePath -> IO Bool
+    isDriveValid drive = handle (\(_ :: SomeException) -> return False) $ do
+        driveType <- Win32.getDriveType (Just drive)
+        return $ driveType /= Win32.dRIVE_UNKNOWN && driveType /= Win32.dRIVE_NO_ROOT_DIR
+    
+    createMountInfo :: FilePath -> IO MountInfo
+    createMountInfo drive = do
+        osPath <- encodeFS drive
+        -- Use drive letter as device identifier on Windows
+        return $ MountInfo osPath drive
 
--- | Comprehensive filesystem boundary detection
-isFileSystemBoundary :: MonadIO m => FilePath -> FilePath -> m Bool
-isFileSystemBoundary path1 path2 = do
-    -- SPECIAL CASE: If paths are the same (after normalization), never a boundary
-    let norm1 = normalise path1
-    let norm2 = normalise path2
-    if norm1 == norm2
-        then do
-            logDebug $ "Same path detected: " ++ norm1 ++ " == " ++ norm2
-            return False
-        else do
-            -- First check device boundary (most reliable)
-            sameDev <- isSameFilesystem path1 path2
-            if not sameDev
-                then return True  -- Different devices = boundary
-                else checkMountBoundary path1 path2  -- Check mount boundaries
+-- Alternative Windows implementation using volume enumeration (more comprehensive)
+getWindowsVolumeInfos :: IO [MountInfo]
+getWindowsVolumeInfos = handle (\(_ :: SomeException) -> getWindowsMountInfos) $ do
+    -- This would use FindFirstVolume/FindNextVolume APIs for more comprehensive volume detection
+    -- For now, fall back to the simpler drive letter approach
+    getWindowsMountInfos
 
--- | Main API: Should we cross this filesystem boundary?
-shouldCrossFilesystemBoundary :: MonadIO m => Bool -> FilePath -> FilePath -> m Bool
-shouldCrossFilesystemBoundary crossMountBoundaries path1 path2 = do
-    logDebug $ "shouldCrossFilesystemBoundary " ++ show crossMountBoundaries ++ " " ++ path1 ++ " -> " ++ path2
-    if crossMountBoundaries
-        then do
-            logDebug "User wants to cross all boundaries"
-            return True  -- User explicitly wants to cross boundaries
-        else do
-            -- First check device boundary (most reliable)
-            sameDev <- isSameFilesystem path1 path2
-            if not sameDev
-                then do
-                    logInfo $ "Different filesystems detected, skipping: " ++ path2
-                    return False  -- Different devices = don't cross
-                else do
-                    -- Check mount boundaries (bind mounts, etc.)
-                    boundary <- checkMountBoundary path1 path2
-                    if boundary
-                        then do
-                            logInfo $ "Mount boundary detected, skipping: " ++ path2
-                            return False
-                        else return True
+#else
+-- Unix-like systems (Linux, macOS, BSD)
+getUnixMountInfos :: IO [MountInfo]
+getUnixMountInfos = do
+#ifdef USE_MOUNTPOINTS
+    -- If mountpoints library is available, use it
+    getMountPointsLibrary
+#else
+    -- Use platform-specific file reading
+    getUnixMountInfosFromFiles
+#endif
+
+#ifdef USE_MOUNTPOINTS
+getMountPointsLibrary :: IO [MountInfo]
+getMountPointsLibrary = do
+    -- This would use the mountpoints library if available
+    -- For now, fall back to file-based approach
+    getUnixMountInfosFromFiles
+#endif
+
+getUnixMountInfosFromFiles :: IO [MountInfo]
+getUnixMountInfosFromFiles = do
+    result <- tryReadMountsFile
+    case result of
+        Just mountInfos -> return mountInfos
+        Nothing -> do
+            -- Fallback to root filesystem
+            rootPath <- encodeFS "/"
+            return [MountInfo rootPath "/"]
+  where
+    tryReadMountsFile :: IO (Maybe [MountInfo])
+    tryReadMountsFile = do
+        -- Try different mount info sources in order of preference
+        linuxResult <- tryLinuxMounts
+        case linuxResult of
+            Just infos -> return (Just infos)
+            Nothing -> tryBSDMounts
+    
+    tryLinuxMounts :: IO (Maybe [MountInfo])
+    tryLinuxMounts = handle (\(_ :: SomeException) -> return Nothing) $ do
+        -- Try /proc/self/mountinfo first (more detailed), then /proc/mounts
+        mountInfoResult <- tryReadFile "/proc/self/mountinfo"
+        case mountInfoResult of
+            Just content -> Just <$> parseLinuxMountInfo content
+            Nothing -> do
+                mountsResult <- tryReadFile "/proc/mounts"
+                case mountsResult of
+                    Just content -> Just <$> parseLinuxMounts content
+                    Nothing -> return Nothing
+    
+    tryBSDMounts :: IO (Maybe [MountInfo])
+    tryBSDMounts = handle (\(_ :: SomeException) -> return Nothing) $ do
+        -- On BSD systems, try to read mount information
+        -- This could be extended to use getmntinfo() via FFI
+        return Nothing
+    
+    tryReadFile :: FilePath -> IO (Maybe BS.ByteString)
+    tryReadFile path = handle (\(_ :: SomeException) -> return Nothing) $ do
+        content <- BS.readFile path
+        return (Just content)
+    
+    parseLinuxMountInfo :: BS.ByteString -> IO [MountInfo]
+    parseLinuxMountInfo content = do
+        let lines' = BS8.lines content
+        mountInfos <- mapM parseMountInfoLine lines'
+        return $ catMaybes mountInfos
+    
+    parseLinuxMounts :: BS.ByteString -> IO [MountInfo]
+    parseLinuxMounts content = do
+        let lines' = BS8.lines content
+        mountInfos <- mapM parseMountsLine lines'
+        return $ catMaybes mountInfos
+    
+    parseMountInfoLine :: BS.ByteString -> IO (Maybe MountInfo)
+    parseMountInfoLine line = handle (\(_ :: SomeException) -> return Nothing) $ do
+        -- /proc/self/mountinfo format: ID PARENT-ID MAJOR:MINOR ROOT MOUNT-POINT OPTIONS...
+        case BS8.words line of
+            (_:_:majorMinor:_:mountPoint:_) -> do
+                osPath <- encodeFS (BS8.unpack mountPoint)
+                pathExists <- doesPathExist osPath
+                if pathExists
+                    then return $ Just $ MountInfo osPath (BS8.unpack majorMinor)
+                    else return Nothing
+            _ -> return Nothing
+    
+    parseMountsLine :: BS.ByteString -> IO (Maybe MountInfo)
+    parseMountsLine line = handle (\(_ :: SomeException) -> return Nothing) $ do
+        -- /proc/mounts format: DEVICE MOUNT-POINT FSTYPE OPTIONS FREQ PASSNO
+        case BS8.words line of
+            (device:mountPoint:_) -> do
+                osPath <- encodeFS (BS8.unpack mountPoint)
+                pathExists <- doesPathExist osPath
+                if pathExists
+                    then return $ Just $ MountInfo osPath (BS8.unpack device)
+                    else return Nothing
+            _ -> return Nothing
+    
+    catMaybes :: [Maybe a] -> [a]
+    catMaybes = foldr (\x acc -> case x of Just y -> y:acc; Nothing -> acc) []
+#endif
+
+-- Check if there's a filesystem boundary between two paths
+isFileSystemBoundary :: MonadIO m => MountCache -> OsPath -> OsPath -> m Bool
+isFileSystemBoundary cache path1 path2 = liftIO $ do
+    -- Ensure mount cache is populated
+    (MountCache cacheRef) <- return cache
+    mountInfos <- readIORef cacheRef
+    when (Set.null mountInfos) $ refreshMountCache cache
+    
+    -- Get updated mount points
+    mountInfos' <- readIORef cacheRef
+    let sortedMounts = sortOn (negate . length . splitDirectories . mountPath) (Set.toList mountInfos')
+    
+    -- Find mount points for both paths
+    mount1 <- findMountInfo sortedMounts (normalise path1)
+    mount2 <- findMountInfo sortedMounts (normalise path2)
+    
+    -- Paths are on different filesystems if they have different mount points
+    return $ case (mount1, mount2) of
+        (Just m1, Just m2) -> mountDevice m1 /= mountDevice m2
+        _ -> False  -- If we can't determine, assume same filesystem
+  where
+    when :: Monad m => Bool -> m () -> m ()
+    when True action = action
+    when False _ = return ()
+
+-- Find the mount info that contains the given path
+findMountInfo :: [MountInfo] -> OsPath -> IO (Maybe MountInfo)
+findMountInfo mountInfos path = return $ find (isPathUnderMount path) mountInfos
+  where
+    isPathUnderMount :: OsPath -> MountInfo -> Bool
+    isPathUnderMount checkPath mountInfo = 
+        let mountComponents = splitDirectories (mountPath mountInfo)
+            pathComponents = splitDirectories checkPath
+        in length mountComponents <= length pathComponents && 
+           take (length mountComponents) pathComponents == mountComponents
+
+-- Get the specific mount point for a given path
+getMountPointFor :: MonadIO m => MountCache -> OsPath -> m (Maybe OsPath)
+getMountPointFor cache path = liftIO $ do
+    (MountCache cacheRef) <- return cache
+    mountInfos <- readIORef cacheRef
+    when (Set.null mountInfos) $ refreshMountCache cache
+    
+    mountInfos' <- readIORef cacheRef
+    let sortedMounts = sortOn (negate . length . splitDirectories . mountPath) (Set.toList mountInfos')
+    result <- findMountInfo sortedMounts (normalise path)
+    return (mountPath <$> result)
+  where
+    when :: Monad m => Bool -> m () -> m ()
+    when True action = action
+    when False _ = return ()
+
+-- Helper instances for MountInfo
+instance Ord MountInfo where
+    compare m1 m2 = compare (mountPath m1) (mountPath m2)
