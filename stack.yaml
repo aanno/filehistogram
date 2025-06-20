@@ -51,6 +51,13 @@ packages:
 extra-deps:
 - streamly-0.10.1@sha256:c0cdf0c1e57d8011bd585a0e571b3f92fb10f31458cdc8d466128c24b18af74a,20978
 
+# # for System.OsPath, System.MountPoints
+# - filepath-1.5.4.0@sha256:099c33e0e570dad93390e1c01c1f4bc6e4f13587de8e199df3c94a6cb62c7434,4945
+# # dependencies of filepath 1.5 (updated from 1.4)
+# - directory-1.3.9.0@sha256:2490137bb7738bd79392959458ef5f276219ea5ba8a9a56d3e0b06315c1bb917,3307
+# - process-1.6.26.1@sha256:6def2e07c317f52f4d30c43e92f97b7bc5f7c27cb1270d386b15dce429e1180f,2947
+# - unix-2.8.7.0@sha256:1f5f3cf31be1a052ab2d7caebc5185888adeca0c6606c6bc7e45223d09cca9f0,9867
+
 # Override default flag values for project packages and extra-deps
 # flags: {}
 

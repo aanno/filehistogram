@@ -1,5 +1,6 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module MountBoundary
   ( MountCache
@@ -18,27 +19,17 @@ import qualified Data.Set as Set
 import Data.Set (Set)
 import System.OsPath
 import System.OsPath.Types (OsPath)
+import System.Directory (doesPathExist)
 import Control.Exception (try, SomeException, handle)
 
 #ifdef mingw32_HOST_OS
-import System.OsPath.Windows (encodeUtf)
 import qualified System.Win32.File as Win32
 import qualified System.Win32.Types as Win32
-import Foreign.Marshal.Alloc (allocaBytes)
-import Foreign.Marshal.Array (peekArray)
-import Foreign.Ptr (Ptr, nullPtr)
-import Foreign.C.Types (CULong, CWchar)
-import Foreign.Storable (peek)
-import System.Win32.Utils (try)
 #else
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
-import System.File.OsPath (getFileStatus)
-import System.Directory.OsPath (doesPathExist)
-#ifdef USE_MOUNTPOINTS
--- Optional: if user wants to use the mountpoints library
+-- System.MountPoints temporarily disabled due to API compatibility issues
 -- import qualified System.MountPoints as MP
-#endif
 #endif
 
 -- Cache for mount points - stores normalized mount paths and their metadata
@@ -46,6 +37,9 @@ data MountInfo = MountInfo
   { mountPath :: !OsPath
   , mountDevice :: !String  -- Device identifier for uniqueness check
   } deriving (Eq, Show)
+
+instance Ord MountInfo where
+    compare m1 m2 = compare (mountPath m1) (mountPath m2)
 
 newtype MountCache = MountCache (IORef (Set MountInfo))
 
@@ -73,8 +67,7 @@ getAllMountPoints = liftIO $ do
 getAllMountInfos :: IO [MountInfo]
 getAllMountInfos = handle handleError getMountInfosPlatform
   where
-    handleError :: SomeException -> IO [MountInfo]
-    handleError _ = do
+    handleError (_ :: SomeException) = do
         -- Fallback: return at least root directory
         rootPath <- encodeFS "/"
         return [MountInfo rootPath "unknown"]
@@ -112,40 +105,28 @@ getWindowsMountInfos = do
         -- Use drive letter as device identifier on Windows
         return $ MountInfo osPath drive
 
--- Alternative Windows implementation using volume enumeration (more comprehensive)
-getWindowsVolumeInfos :: IO [MountInfo]
-getWindowsVolumeInfos = handle (\(_ :: SomeException) -> getWindowsMountInfos) $ do
-    -- This would use FindFirstVolume/FindNextVolume APIs for more comprehensive volume detection
-    -- For now, fall back to the simpler drive letter approach
-    getWindowsMountInfos
+    filterM :: Monad m => (a -> m Bool) -> [a] -> m [a]
+    filterM p = foldr (\x -> liftM2 (\flg -> if flg then (x:) else id) (p x)) (return [])
+    
+    liftM2 :: Monad m => (a -> b -> c) -> m a -> m b -> m c
+    liftM2 f ma mb = do { a <- ma; b <- mb; return (f a b) }
 
 #else
--- Unix-like systems (Linux, macOS, BSD)
+-- Unix-like systems (Linux, macOS, BSD) using fallback implementation
 getUnixMountInfos :: IO [MountInfo]
 getUnixMountInfos = do
-#ifdef USE_MOUNTPOINTS
-    -- If mountpoints library is available, use it
-    getMountPointsLibrary
-#else
-    -- Use platform-specific file reading
-    getUnixMountInfosFromFiles
-#endif
+    -- Skip System.MountPoints for now due to API uncertainty
+    -- Use direct fallback implementation which is reliable
+    getFallbackMountInfos
 
-#ifdef USE_MOUNTPOINTS
-getMountPointsLibrary :: IO [MountInfo]
-getMountPointsLibrary = do
-    -- This would use the mountpoints library if available
-    -- For now, fall back to file-based approach
-    getUnixMountInfosFromFiles
-#endif
-
-getUnixMountInfosFromFiles :: IO [MountInfo]
-getUnixMountInfosFromFiles = do
+-- Fallback implementation for when System.MountPoints fails
+getFallbackMountInfos :: IO [MountInfo]
+getFallbackMountInfos = do
     result <- tryReadMountsFile
     case result of
         Just mountInfos -> return mountInfos
         Nothing -> do
-            -- Fallback to root filesystem
+            -- Ultimate fallback to root filesystem
             rootPath <- encodeFS "/"
             return [MountInfo rootPath "/"]
   where
@@ -171,8 +152,8 @@ getUnixMountInfosFromFiles = do
     
     tryBSDMounts :: IO (Maybe [MountInfo])
     tryBSDMounts = handle (\(_ :: SomeException) -> return Nothing) $ do
-        -- On BSD systems, try to read mount information
-        -- This could be extended to use getmntinfo() via FFI
+        -- On BSD systems, this could be extended to use getmntinfo() via FFI
+        -- For now, return Nothing to use the ultimate fallback
         return Nothing
     
     tryReadFile :: FilePath -> IO (Maybe BS.ByteString)
@@ -197,8 +178,9 @@ getUnixMountInfosFromFiles = do
         -- /proc/self/mountinfo format: ID PARENT-ID MAJOR:MINOR ROOT MOUNT-POINT OPTIONS...
         case BS8.words line of
             (_:_:majorMinor:_:mountPoint:_) -> do
-                osPath <- encodeFS (BS8.unpack mountPoint)
-                pathExists <- doesPathExist osPath
+                let mountPointStr = BS8.unpack mountPoint
+                osPath <- encodeFS mountPointStr
+                pathExists <- doesPathExist mountPointStr
                 if pathExists
                     then return $ Just $ MountInfo osPath (BS8.unpack majorMinor)
                     else return Nothing
@@ -209,8 +191,9 @@ getUnixMountInfosFromFiles = do
         -- /proc/mounts format: DEVICE MOUNT-POINT FSTYPE OPTIONS FREQ PASSNO
         case BS8.words line of
             (device:mountPoint:_) -> do
-                osPath <- encodeFS (BS8.unpack mountPoint)
-                pathExists <- doesPathExist osPath
+                let mountPointStr = BS8.unpack mountPoint
+                osPath <- encodeFS mountPointStr
+                pathExists <- doesPathExist mountPointStr
                 if pathExists
                     then return $ Just $ MountInfo osPath (BS8.unpack device)
                     else return Nothing
@@ -271,7 +254,3 @@ getMountPointFor cache path = liftIO $ do
     when :: Monad m => Bool -> m () -> m ()
     when True action = action
     when False _ = return ()
-
--- Helper instances for MountInfo
-instance Ord MountInfo where
-    compare m1 m2 = compare (mountPath m1) (mountPath m2)

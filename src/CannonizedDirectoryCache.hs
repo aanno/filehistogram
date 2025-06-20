@@ -1,3 +1,5 @@
+{-# LANGUAGE ScopedTypeVariables #-}
+
 module CannonizedDirectoryCache
   ( CannonizedDirectoryCache
   , newCache
@@ -9,10 +11,10 @@ module CannonizedDirectoryCache
 
 import qualified Data.Map.Strict as Map
 import Data.IORef
-import System.OsPath
+import System.OsPath hiding (isAbsolute)  -- Hide to avoid ambiguity
 import System.OsPath.Types (OsPath)
-import System.File.OsPath
-import System.Directory.OsPath
+import System.Directory (doesPathExist, getCurrentDirectory, pathIsSymbolicLink, getSymbolicLinkTarget)
+import qualified System.FilePath as FP
 import Control.Exception (try, SomeException)
 import Control.Monad (foldM)
 
@@ -28,7 +30,7 @@ data CacheStats = CacheStats
 
 data CannonizedDirectoryCache = CannonizedDirectoryCache
   { cacheMap :: !(IORef CacheMap)
-  , cacheStats :: !(IORef CacheStats)
+  , cacheStatsRef :: !(IORef CacheStats)
   }
 
 -- Create a new empty cache
@@ -56,35 +58,37 @@ lookupInCache :: CannonizedDirectoryCache -> OsPath -> IO (Maybe OsPath)
 lookupInCache cache path = do
     cacheMap' <- readIORef (cacheMap cache)
     let result = Map.lookup path cacheMap'
-    modifyIORef' (cacheStats cache) $ \stats -> 
+    modifyIORef' (cacheStatsRef cache) $ \stats -> 
         stats { totalLookups = totalLookups stats + 1 }
     return result
 
 -- Record a cache hit
 recordCacheHit :: CannonizedDirectoryCache -> IO ()
 recordCacheHit cache = 
-    modifyIORef' (cacheStats cache) $ \stats -> 
+    modifyIORef' (cacheStatsRef cache) $ \stats -> 
         stats { cacheHits = cacheHits stats + 1 }
 
 -- Record a cache miss  
 recordCacheMiss :: CannonizedDirectoryCache -> IO ()
 recordCacheMiss cache = 
-    modifyIORef' (cacheStats cache) $ \stats -> 
+    modifyIORef' (cacheStatsRef cache) $ \stats -> 
         stats { cacheMisses = cacheMisses stats + 1 }
 
 -- Canonicalize a path by resolving symlinks component by component,
 -- caching intermediate results
 canonicalizePathWithCache :: CannonizedDirectoryCache -> OsPath -> IO OsPath
 canonicalizePathWithCache cache path = do
-    -- Split the path into components
+    -- Convert to FilePath for directory operations, then back to OsPath
+    pathStr <- decodeFS path
     let components = splitDirectories path
     
     -- Handle absolute vs relative paths
-    (initialPath, remainingComponents) <- if isAbsolute path
+    (initialPath, remainingComponents) <- if FP.isAbsolute pathStr
         then return (head components, tail components)
         else do
             cwd <- getCurrentDirectory
-            return (cwd, components)
+            cwdOsPath <- encodeFS cwd
+            return (cwdOsPath, components)
         
     -- Resolve each component incrementally
     result <- foldM (resolveNextComponent cache) initialPath remainingComponents
@@ -120,27 +124,44 @@ resolveNextComponent cache basePath component = do
 -- Resolve a single directory, following one level of symlink if necessary
 resolveSingleDirectory :: OsPath -> IO OsPath
 resolveSingleDirectory path = do
+    -- Convert to FilePath for directory operations
+    pathStr <- decodeFS path
+    
     -- First check if the path exists
-    pathExists <- doesPathExist path
+    pathExists <- doesPathExist pathStr
     if not pathExists
         then return path  -- Return as-is if path doesn't exist
         else do
             -- Check if it's a symbolic link
-            result <- try (pathIsSymbolicLink path) :: IO (Either SomeException Bool)
+            result <- try (pathIsSymbolicLink pathStr) :: IO (Either SomeException Bool)
             case result of
                 Left _ -> return path  -- If we can't check, assume it's not a symlink
                 Right isSymlink -> 
                     if isSymlink
                         then do
                             -- Get the symlink target
-                            targetResult <- try (getSymbolicLinkTarget path) :: IO (Either SomeException OsPath)
+                            targetResult <- try (getSymbolicLinkTarget pathStr) :: IO (Either SomeException FilePath)
                             case targetResult of
                                 Left _ -> return path  -- If we can't read target, return original
-                                Right target -> 
-                                    if isAbsolute target
-                                        then return (normalise target)
-                                        else return (normalise (takeDirectory path </> target))
+                                Right target -> do
+                                    if FP.isAbsolute target
+                                        then do
+                                            targetOsPath <- encodeFS target
+                                            return (normalise targetOsPath)
+                                        else do
+                                            baseDir <- decodeFS (takeDirectory' path)
+                                            let resolvedPath = baseDir ++ "/" ++ target  -- Simple path joining
+                                            resolvedOsPath <- encodeFS resolvedPath
+                                            return (normalise resolvedOsPath)
                         else return path  -- Not a symlink, return as-is
+  where
+    -- Helper function to get directory part of OsPath
+    takeDirectory' :: OsPath -> OsPath
+    takeDirectory' p = 
+        let components = splitDirectories p
+        in if length components <= 1 
+           then p  -- Root or current directory
+           else joinPath (init components)
 
 -- Insert a mapping into the cache
 insertIntoCache :: CannonizedDirectoryCache -> OsPath -> OsPath -> IO ()
@@ -151,7 +172,7 @@ insertIntoCache cache original canonical =
 clearCache :: CannonizedDirectoryCache -> IO ()
 clearCache cache = do
     writeIORef (cacheMap cache) Map.empty
-    writeIORef (cacheStats cache) (CacheStats 0 0 0)
+    writeIORef (cacheStatsRef cache) (CacheStats 0 0 0)
 
 -- Get the number of cached entries (for debugging/monitoring)
 cacheSize :: CannonizedDirectoryCache -> IO Int
@@ -159,7 +180,7 @@ cacheSize cache = Map.size <$> readIORef (cacheMap cache)
 
 -- Get cache statistics (for debugging/monitoring)
 cacheStats :: CannonizedDirectoryCache -> IO CacheStats
-cacheStats cache = readIORef (cacheStats cache)
+cacheStats cache = readIORef (cacheStatsRef cache)
 
 -- Calculate cache hit ratio
 cacheHitRatio :: CacheStats -> Double

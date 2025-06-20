@@ -19,8 +19,8 @@ import Control.Concurrent.STM
 import Control.Concurrent.Async (mapConcurrently)
 import System.OsPath
 import System.OsPath.Types (OsPath)
-import System.Directory.OsPath
-import System.File.OsPath
+import System.Directory
+import System.FilePath (isAbsolute)
 import Data.Function ((&))
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -89,8 +89,8 @@ scanFilesStream opts caches path =
                 canonPathStr <- liftIO $ decodeFS canonPath
                 logDebug $ "Canonicalized path: " ++ canonPathStr
                 
-                -- Check if it's a directory
-                isDir <- liftIO $ doesDirectoryExist canonPath
+                -- Check if it's a directory (convert to FilePath for directory operations)
+                isDir <- liftIO $ doesDirectoryExist canonPathStr
                 if isDir
                     then do
                         -- Create thread-safe visited set using STM
@@ -117,7 +117,7 @@ scanDirectoryConcurrent opts caches visitedTVar dirPath depth =
             S.concatEffect $ do
                 dirPathStr <- liftIO $ decodeFS dirPath
                 logDebug $ "Scanning directory (depth " ++ show depth ++ "): " ++ dirPathStr
-                contentsResult <- liftIO $ try (listDirectory dirPath)
+                contentsResult <- liftIO $ try (listDirectory dirPathStr)
                 case contentsResult of
                     Left ex -> do
                         logWarn $ "Cannot read directory " ++ dirPathStr ++ ": " ++ show (ex :: IOException)
@@ -126,8 +126,11 @@ scanDirectoryConcurrent opts caches visitedTVar dirPath depth =
                         when (length contents > 10000) $ 
                             logWarn $ "Large directory with " ++ show (length contents) ++ " items: " ++ dirPathStr
                         
+                        -- Convert String paths to OsPath
+                        osContents <- liftIO $ mapM encodeFS contents
+                        
                         -- Process items with manual concurrency control
-                        return $ processItemsConcurrently opts caches visitedTVar dirPath depth contents
+                        return $ processItemsConcurrently opts caches visitedTVar dirPath depth osContents
 
 -- | Process directory items with concurrency control
 processItemsConcurrently :: MonadIO m => ScanOptions -> ScanCaches -> TVar (HashSet Text) -> OsPath -> Int -> [OsPath] -> Stream m FileInfo
@@ -141,14 +144,17 @@ processDirectoryItem :: MonadIO m => ScanOptions -> ScanCaches -> TVar (HashSet 
 processDirectoryItem opts caches visitedTVar dirPath depth item = do
     let fullPath = dirPath </> item
     
+    -- Convert to FilePath for file operations
+    fullPathStr <- liftIO $ decodeFS fullPath
+    
     -- Check if it's a symbolic link first
-    isLink <- liftIO $ pathIsSymbolicLink fullPath
+    isLink <- liftIO $ pathIsSymbolicLink fullPathStr
     
     if isLink && not (followSymlinks opts)
         then return S.nil
         else do
             -- Check file type
-            isFile <- liftIO $ doesFileExist fullPath
+            isFile <- liftIO $ doesFileExist fullPathStr
             if isFile
                 then do
                     -- It's a file - get its info
@@ -158,7 +164,7 @@ processDirectoryItem opts caches visitedTVar dirPath depth item = do
                         Nothing -> return S.nil
                 else do
                     -- Check if it's a directory
-                    isDir <- liftIO $ doesDirectoryExist fullPath
+                    isDir <- liftIO $ doesDirectoryExist fullPathStr
                     if isDir
                         then processSubdirectory opts caches visitedTVar dirPath depth fullPath
                         else return S.nil
@@ -211,14 +217,14 @@ processSubdirectory opts caches visitedTVar parentPath depth fullPath = do
 -- | Get file information safely
 getFileInfoSafe :: MonadIO m => OsPath -> m (Maybe FileInfo)
 getFileInfoSafe filePath = do
-    result <- liftIO $ try (getFileSize filePath)
+    -- Convert to FilePath for file operations in filepath 1.4
+    filePathStr <- liftIO $ decodeFS filePath
+    result <- liftIO $ try (getFileSize filePathStr)
     case result of
         Left ex -> do
-            filePathStr <- liftIO $ decodeFS filePath
             logDebug $ "Cannot get size of file " ++ filePathStr ++ ": " ++ show (ex :: IOException)
             return Nothing
         Right size -> do
-            filePathStr <- liftIO $ decodeFS filePath
             filePathText <- liftIO $ T.pack <$> decodeFS filePath
             logDebug $ "File: " ++ filePathStr ++ " -> " ++ show size ++ " bytes"
             return $ Just $ FileInfo filePathText size
