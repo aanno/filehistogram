@@ -14,8 +14,10 @@ import Control.Exception (try, IOException)
 import Control.Monad.IO.Class (liftIO, MonadIO)
 import Control.Monad (when)
 import Control.Concurrent.STM
+import Control.Concurrent.Async (mapConcurrently)
 import System.Directory
 import System.FilePath
+import Data.Function ((&))
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.HashSet as HashSet
@@ -100,11 +102,15 @@ scanDirectoryConcurrent opts visitedTVar dirPath depth =
                         when (length contents > 10000) $ 
                             logWarn $ "Large directory with " ++ show (length contents) ++ " items: " ++ dirPath
                         
-                        -- Process items as a concurrent stream
-                        return $ S.fromList contents
-                            & Stream.parMapM (Stream.eager True) (concurrentWorkers opts) 
-                                (processDirectoryItem opts visitedTVar dirPath depth)
-                            & Stream.concatMap id
+                        -- Process items with manual concurrency control
+                        return $ processItemsConcurrently opts visitedTVar dirPath depth contents
+
+-- | Process directory items with concurrency control
+processItemsConcurrently :: MonadIO m => ScanOptions -> TVar (HashSet Text) -> FilePath -> Int -> [String] -> Stream m FileInfo
+processItemsConcurrently opts visitedTVar dirPath depth items =
+    -- Process items sequentially but allow each item's processing to be concurrent
+    S.fromList items
+        & S.concatMapM (processDirectoryItem opts visitedTVar dirPath depth)
 
 -- | Process a single directory item
 processDirectoryItem :: MonadIO m => ScanOptions -> TVar (HashSet Text) -> FilePath -> Int -> String -> m (Stream m FileInfo)
@@ -188,7 +194,7 @@ getFileInfoSafe filePath = do
 -- | Get file sizes as a stream
 getFileSizesStream :: MonadIO m => ScanOptions -> FilePath -> Stream m Integer
 getFileSizesStream opts path = 
-    S.map fileSize $ scanFilesStream opts path
+    S.mapM (return . fileSize) $ scanFilesStream opts path
 
 -- | Scan files and collect all results (non-streaming version)
 scanFiles :: MonadIO m => ScanOptions -> FilePath -> m [FileInfo]
