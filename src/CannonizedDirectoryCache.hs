@@ -2,14 +2,16 @@
 
 module CannonizedDirectoryCache
   ( CannonizedDirectoryCache
+  , CacheStats(..)  -- Export the constructor and all fields
   , newCache
+  , newCacheWithSize
   , getCanonicalized
   , clearCache
   , cacheSize
   , cacheStats
   ) where
 
-import qualified Data.Map.Strict as Map
+import qualified Data.Cache.LRU as LRU
 import Data.IORef
 import System.OsPath hiding (isAbsolute)  -- Hide to avoid ambiguity
 import System.OsPath.Types (OsPath)
@@ -20,24 +22,35 @@ import Control.Monad (foldM)
 
 -- Cache maps original directory paths to their canonicalized equivalents
 -- If key == value, the original path is not a symlink
-type CacheMap = Map.Map OsPath OsPath
+type CacheMap = LRU.LRU OsPath OsPath
+
+-- Default cache size
+defaultCacheSize :: Integer
+defaultCacheSize = 100000
 
 data CacheStats = CacheStats
   { cacheHits :: !Int
   , cacheMisses :: !Int
   , totalLookups :: !Int
+  , cacheEvictions :: !Int  -- Track evictions
   } deriving (Show, Eq)
 
 data CannonizedDirectoryCache = CannonizedDirectoryCache
   { cacheMap :: !(IORef CacheMap)
   , cacheStatsRef :: !(IORef CacheStats)
+  , maxCacheSize :: !Integer
   }
 
--- Create a new empty cache
+-- Create a new empty cache with default size
 newCache :: IO CannonizedDirectoryCache
-newCache = CannonizedDirectoryCache 
-  <$> newIORef Map.empty 
-  <*> newIORef (CacheStats 0 0 0)
+newCache = newCacheWithSize defaultCacheSize
+
+-- Create a new empty cache with specified size
+newCacheWithSize :: Integer -> IO CannonizedDirectoryCache
+newCacheWithSize size = CannonizedDirectoryCache 
+  <$> newIORef (LRU.newLRU (Just size))
+  <*> newIORef (CacheStats 0 0 0 0)
+  <*> pure size
 
 -- Get the canonicalized version of a directory path, using cache when possible
 getCanonicalized :: CannonizedDirectoryCache -> OsPath -> IO OsPath
@@ -56,10 +69,14 @@ getCanonicalized cache path = do
 -- Look up a path in the cache
 lookupInCache :: CannonizedDirectoryCache -> OsPath -> IO (Maybe OsPath)
 lookupInCache cache path = do
-    cacheMap' <- readIORef (cacheMap cache)
-    let result = Map.lookup path cacheMap'
     modifyIORef' (cacheStatsRef cache) $ \stats -> 
         stats { totalLookups = totalLookups stats + 1 }
+    
+    -- LRU lookup returns (newLRU, Maybe value)
+    -- We need to update the cache with the new LRU state
+    cacheMap' <- readIORef (cacheMap cache)
+    let (newLRU, result) = LRU.lookup path cacheMap'
+    writeIORef (cacheMap cache) newLRU
     return result
 
 -- Record a cache hit
@@ -165,18 +182,30 @@ resolveSingleDirectory path = do
 
 -- Insert a mapping into the cache
 insertIntoCache :: CannonizedDirectoryCache -> OsPath -> OsPath -> IO ()
-insertIntoCache cache original canonical = 
-    modifyIORef' (cacheMap cache) (Map.insert original canonical)
+insertIntoCache cache original canonical = do
+    oldLRU <- readIORef (cacheMap cache)
+    let (newLRU, mEvicted) = LRU.insertInforming original canonical oldLRU
+    
+    -- Track evictions
+    case mEvicted of
+        Nothing -> return ()
+        Just _ -> modifyIORef' (cacheStatsRef cache) $ \stats ->
+            stats { cacheEvictions = cacheEvictions stats + 1 }
+    
+    writeIORef (cacheMap cache) newLRU
 
 -- Clear all cached entries
 clearCache :: CannonizedDirectoryCache -> IO ()
 clearCache cache = do
-    writeIORef (cacheMap cache) Map.empty
-    writeIORef (cacheStatsRef cache) (CacheStats 0 0 0)
+    let size = maxCacheSize cache
+    writeIORef (cacheMap cache) (LRU.newLRU (Just size))
+    writeIORef (cacheStatsRef cache) (CacheStats 0 0 0 0)
 
 -- Get the number of cached entries (for debugging/monitoring)
 cacheSize :: CannonizedDirectoryCache -> IO Int
-cacheSize cache = Map.size <$> readIORef (cacheMap cache)
+cacheSize cache = do
+    lru <- readIORef (cacheMap cache)
+    return $ LRU.size lru
 
 -- Get cache statistics (for debugging/monitoring)
 cacheStats :: CannonizedDirectoryCache -> IO CacheStats

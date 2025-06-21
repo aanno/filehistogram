@@ -53,6 +53,7 @@ library
     , filepath >=1.4
     , hspec >=2.11.12
     , hvega >=0.12.0.7
+    , lrucache >=1.2 && <2
     , process >=1.6.25.0
     , stm
     , streamly >=0.10.1
@@ -92,6 +93,7 @@ executable filehistogram-exe
     , filepath >=1.4
     , hspec >=2.11.12
     , hvega >=0.12.0.7
+    , lrucache >=1.2 && <2
     , process >=1.6.25.0
     , stm
     , streamly >=0.10.1
@@ -131,6 +133,7 @@ executable filescanner-exe
     , filepath >=1.4
     , hspec >=2.11.12
     , hvega >=0.12.0.7
+    , lrucache >=1.2 && <2
     , process >=1.6.25.0
     , stm
     , streamly >=0.10.1
@@ -170,6 +173,7 @@ test-suite filehistogram-test
     , filepath >=1.4
     , hspec
     , hvega >=0.12.0.7
+    , lrucache >=1.2 && <2
     , process >=1.6.25.0
     , stm
     , streamly >=0.10.1
@@ -213,6 +217,7 @@ benchmark filehistogram-bench
     , gauge
     , hspec >=2.11.12
     , hvega >=0.12.0.7
+    , lrucache >=1.2 && <2
     , process >=1.6.25.0
     , stm
     , streamly

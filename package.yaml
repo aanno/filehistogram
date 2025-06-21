@@ -34,6 +34,7 @@ dependencies:
 - time >= 1.12.2
 - unix >= 2.8.6.0
 - unordered-containers >= 0.2.20
+- lrucache >= 1.2 && < 2
 - stm
 - async
 - temporary

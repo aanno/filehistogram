@@ -35,11 +35,11 @@ printCacheStats caches = do
     putStrLn $ "Canonicalization cache entries: " ++ show canonCacheSize
     putStrLn $ "Cache hits: " ++ show (CDC.cacheHits canonStats)
     putStrLn $ "Cache misses: " ++ show (CDC.cacheMisses canonStats)
-    putStrLn $ "Hit ratio: " ++ printf "%.2f%%" (hitRatio canonStats * 100)
+    putStrLn $ "Hit ratio: " ++ printf "%.2f%%" ((hitRatio canonStats * 100) :: Double)
   where
     hitRatio stats = 
-        let hits = fromIntegral (CDC.cacheHits stats)
-            total = fromIntegral (CDC.totalLookups stats)
+        let hits = fromIntegral (CDC.cacheHits stats) :: Double
+            total = fromIntegral (CDC.totalLookups stats) :: Double
         in if total > 0 then hits / total else 0.0
 
 -- | Streaming scan with progress reporting
@@ -66,7 +66,6 @@ streamingScanWithProgress opts caches startPath = do
             printFileInfo fileInfo
             return (count + 1, size + fileSize fileInfo))
         (return (0, 0))
-        return
 
 -- | Batch scan (collect all results first)
 batchScan :: ScanOptions -> ScanCaches -> OsPath -> IO ()
