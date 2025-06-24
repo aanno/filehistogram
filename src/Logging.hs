@@ -24,7 +24,8 @@ import Control.Monad.IO.Class (liftIO, MonadIO)
 import Control.Monad (when, forM_)
 import Control.Concurrent.STM
 import Control.Concurrent.Async
-import System.IO (hPutStrLn, stderr, Handle)
+import System.IO (hPutStrLn, stderr, Handle, openFile, IOMode (AppendMode), hClose)
+import System.OsPath (decodeFS)
 import Data.Time (getCurrentTime, formatTime, defaultTimeLocale, UTCTime)
 import qualified Streamly.Data.Stream.Prelude as S
 import Streamly.Data.Stream (Stream)
@@ -95,11 +96,12 @@ getLogLevel = liftIO $ do
     return $ minLogLevel config
 
 -- | Initialize the logging system
-initLogging :: MonadIO m => LogConfig -> m ()
+{-# DEPRECATED initLogging "Use withLogging instead, internal use only" #-}
+initLogging :: MonadIO m => LogConfig -> m (Maybe Handle)
 initLogging config = liftIO $ do
     -- Update the global config FIRST
     writeIORef globalLogConfig config
-    
+
     when (enableAsync config) $ do
         -- Stop existing worker if any
         maybeWorker <- readIORef globalLogWorker
@@ -108,6 +110,23 @@ initLogging config = liftIO $ do
         -- Start new async log worker
         worker <- async $ runLogWorker config
         writeIORef globalLogWorker (Just worker)
+
+    -- Close any existing log handle
+    maybeHandle <- readIORef globalLogHandle
+    forM_ maybeHandle hClose
+
+    case logFile config of
+        Nothing -> do
+            -- No log file configured
+            writeIORef globalLogHandle Nothing
+            return Nothing  -- No handle to return
+
+        Just file -> do
+            -- Open new handle for the log file
+            filePath <- decodeFS file
+            handle <- openFile filePath AppendMode
+            writeIORef globalLogHandle (Just handle)
+            return (Just handle)  -- Return the new handle
 
 -- | Run the log processing worker
 runLogWorker :: LogConfig -> IO ()
@@ -177,21 +196,25 @@ logToStream level = S.mapM $ \msg -> liftIO $ do
 
 -- | Run an action with logging, cleaning up afterwards
 withLogging :: MonadIO m => LogConfig -> m a -> m a
-withLogging config action = do
-    -- Initialize with new config (don't save old config)
-    initLogging config
-    
-    -- Run the action
-    result <- action
-    
-    -- Cleanup worker but DON'T restore old config
-    liftIO $ do
-        -- Stop the log worker
-        maybeWorker <- readIORef globalLogWorker
-        forM_ maybeWorker cancel
-        writeIORef globalLogWorker Nothing
-        
-        -- Keep the current config (don't restore old one)
-        -- This prevents console logging from being re-enabled
-    
-    return result
+withLogging config action = 
+      proceed
+    where 
+        -- proceed:: MonadIO m => LogConfig -> m a -> m a
+        proceed = do
+            -- Initialize with new config (don't save old config)
+            maybeHandle <- initLogging config
+            
+            -- Run the action
+            result <- action
+            
+            -- Cleanup worker but DON'T restore old config
+            liftIO $ do
+                -- Stop the log worker
+                maybeWorker <- readIORef globalLogWorker
+                forM_ maybeWorker cancel
+                writeIORef globalLogWorker Nothing
+                
+                -- Keep the current config (don't restore old one)
+                -- This prevents console logging from being re-enabled
+            
+            return result

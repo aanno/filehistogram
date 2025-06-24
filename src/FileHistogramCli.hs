@@ -9,12 +9,12 @@ module FileHistogramCli
 
 import System.Environment
 import System.Exit
-import System.IO (stderr, stdout)
+import System.IO (stderr, stdout, hClose)
 import System.OsPath
 import Control.Monad (when)
 import Control.Monad.Catch (MonadThrow)
 import Control.Exception (try)
-import Data.Maybe (isJust)
+import Data.Maybe (isJust, fromJust)
 import Data.Traversable (traverse)
 import FileHistogram
 import FileScanner (defaultScanOptions, ScanOptions(..))
@@ -168,7 +168,7 @@ fileHistogramCli = do
             , console = Just stdout
             }
 
-    initLogging logConfig
+    logHandle <- initLogging logConfig
     
     -- Log configuration
     logInfo "=== file-histogram starting ==="
@@ -206,3 +206,6 @@ fileHistogramCli = do
             generateHistogramIncremental scanOpts progressConfig (cliInputPath config) (cliOutputPath config)
     
     logInfo "=== file-histogram completed successfully ==="
+
+    -- Close log file if we opened one
+    when (isJust logHandle) $ hClose $ fromJust logHandle
