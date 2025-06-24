@@ -168,45 +168,47 @@ fileHistogramCli = do
             , console = Just stdout
             }
 
-    logHandle <- initLogging logConfig
-    
-    -- Log configuration
-    logInfo "=== file-histogram starting ==="
-    logDebug $ "Command line arguments: " ++ show args
-    logInfo $ "Input directory: " ++ cliInputPath config
-    logInfo $ "Output file: " ++ cliOutputPath config
-    logInfo $ "Processing mode: " ++ show (cliProcessingMode config)
-    logInfo $ "Progress indicators: " ++ show (cliEnableProgressIndicators config)
-    logInfo $ "Log level: " ++ show (cliLogLevel config)
-    logInfo $ "Concurrent workers: " ++ show (cliConcurrentWorkers config)
-    case cliLogFile config of
-        Just file -> logInfo $ "Log file: " ++ file
-        Nothing -> logInfo "Logging to stderr"
-    
-    -- Set scan options with concurrent workers
-    let scanOpts = defaultScanOptions 
-            { followSymlinks = False
-            , crossMountBoundaries = False
-            , concurrentWorkers = cliConcurrentWorkers config
-            }
-    
-    -- Set global progress configuration
-    progressConfig <- progressConfigWithOverride (cliEnableProgressIndicators config)
-    
-    -- Process based on mode
-    case cliProcessingMode config of
-        TraditionalMode -> do
-            logInfo "Using traditional processing"
-            generateHistogramTraditional scanOpts progressConfig (cliInputPath config) (cliOutputPath config)
-        StreamingMode -> do
-            logInfo "Using streaming processing"
-            generateHistogramStreaming scanOpts progressConfig (cliInputPath config) (cliOutputPath config)
-        IncrementalMode -> do
-            logInfo "Using incremental streaming processing (default)"
-            generateHistogramIncremental scanOpts progressConfig (cliInputPath config) (cliOutputPath config)
-    
-    logInfo "=== file-histogram completed successfully ==="
+    withLogging logConfig $ proceed args config
 
-    -- Close log file if we opened one
+    -- Close log file if we opened one - not needed with withLogging
     -- Data.Foldable.for_ logHandle hClose
-    when (isJust logHandle) $ hClose $ fromJust logHandle
+    -- when (isJust logHandle) $ hClose $ fromJust logHandle
+
+  where
+    proceed args config = do
+        -- Log configuration
+        logInfo "=== file-histogram starting ==="
+        logDebug $ "Command line arguments: " ++ show args
+        logInfo $ "Input directory: " ++ cliInputPath config
+        logInfo $ "Output file: " ++ cliOutputPath config
+        logInfo $ "Processing mode: " ++ show (cliProcessingMode config)
+        logInfo $ "Progress indicators: " ++ show (cliEnableProgressIndicators config)
+        logInfo $ "Log level: " ++ show (cliLogLevel config)
+        logInfo $ "Concurrent workers: " ++ show (cliConcurrentWorkers config)
+        case cliLogFile config of
+            Just file -> logInfo $ "Log file: " ++ file
+            Nothing -> logInfo "Logging to stderr"
+        
+        -- Set scan options with concurrent workers
+        let scanOpts = defaultScanOptions 
+                { followSymlinks = False
+                , crossMountBoundaries = False
+                , concurrentWorkers = cliConcurrentWorkers config
+                }
+        
+        -- Set global progress configuration
+        progressConfig <- progressConfigWithOverride (cliEnableProgressIndicators config)
+        
+        -- Process based on mode
+        case cliProcessingMode config of
+            TraditionalMode -> do
+                logInfo "Using traditional processing"
+                generateHistogramTraditional scanOpts progressConfig (cliInputPath config) (cliOutputPath config)
+            StreamingMode -> do
+                logInfo "Using streaming processing"
+                generateHistogramStreaming scanOpts progressConfig (cliInputPath config) (cliOutputPath config)
+            IncrementalMode -> do
+                logInfo "Using incremental streaming processing (default)"
+                generateHistogramIncremental scanOpts progressConfig (cliInputPath config) (cliOutputPath config)
+        
+        logInfo "=== file-histogram completed successfully ==="
