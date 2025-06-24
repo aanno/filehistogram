@@ -31,6 +31,7 @@ import qualified Streamly.Data.Fold as Fold
 import Streamly.Data.Stream (Stream)
 import qualified Streamly.Data.Stream as Stream
 import qualified Streamly.FileSystem.Dir as Dir  -- Add this import
+import Data.List (isPrefixOf, isInfixOf)
 import Logging
 import qualified MountBoundary as MB
 import qualified CannonizedDirectoryCache as CDC
@@ -91,7 +92,7 @@ scanFilesStream opts caches path =
         
         -- Canonicalize the path using cache
         canonResult <- liftIO $ try (CDC.getCanonicalized (canonCache caches) path)
-        case canonResult of
+        case (canonResult :: Either IOException OsPath) of
             Left ex -> do
                 logError $ "Cannot canonicalize path " ++ pathStr ++ ": " ++ show (ex :: IOException)
                 return S.nil
@@ -104,7 +105,7 @@ scanFilesStream opts caches path =
                 if isDir
                     then do
                         -- Create visited state with size limit
-                        canonPathText <- liftIO $ strictText <$> decodeFS canonPath
+                        canonPathText <- liftIO $ T.pack <$> decodeFS canonPath
                         visitedTVar <- liftIO $ newTVarIO $ VisitedState 
                             { visitedSet = HashSet.singleton canonPathText
                             , visitedCount = 1
@@ -116,13 +117,8 @@ scanFilesStream opts caches path =
                         -- It's a single file
                         maybeInfo <- getFileInfoSafe canonPath
                         case maybeInfo of
-                            Just info -> return $ S.fromPure info
+                            Just info ->                             return $ S.fromPure info
                             Nothing -> return S.nil
-
--- | Convert to strict Text efficiently
-strictText :: String -> Text
-strictText = T.pack
-{-# INLINE strictText #-}
 
 -- | Scan a directory using streaming directory traversal
 scanDirectoryStream :: MonadIO m => ScanOptions -> ScanCaches -> TVar VisitedState -> OsPath -> Int -> Stream m FileInfo
@@ -149,7 +145,7 @@ streamDirectoryChunked :: MonadIO m => FilePath -> Int -> Stream m OsPath
 streamDirectoryChunked dirPathStr chunkSize = S.concatEffect $ do
     -- This is a simplified version - in production you'd want proper streaming
     contentsResult <- liftIO $ try (listDirectory dirPathStr)
-    case contentsResult of
+    case (contentsResult :: Either IOException [FilePath]) of
         Left ex -> do
             logWarn $ "Cannot read directory " ++ dirPathStr ++ ": " ++ show (ex :: IOException)
             return S.nil
@@ -169,40 +165,44 @@ processStreamedItem opts caches visitedTVar dirPath depth item = do
     -- Get path string only once and reuse
     !fullPathStr <- liftIO $ decodeFS fullPath
     
-    -- Check if it's a symbolic link first
-    isLink <- liftIO $ pathIsSymbolicLink fullPathStr
-    
-    if isLink && not (followSymlinks opts)
+    -- Skip special filesystems early
+    if "/proc/" `isPrefixOf` fullPathStr || "/sys/" `isPrefixOf` fullPathStr
         then return S.nil
         else do
-            -- Check file type
-            isFile <- liftIO $ doesFileExist fullPathStr
-            if isFile
-                then do
-                    -- It's a file - get its info
-                    maybeInfo <- getFileInfoSafe' fullPath fullPathStr  -- Reuse string
-                    case maybeInfo of
-                        Just info -> return $ S.fromPure info
-                        Nothing -> return S.nil
+            -- Check if it's a symbolic link first
+            isLink <- liftIO $ pathIsSymbolicLink fullPathStr
+            
+            if isLink && not (followSymlinks opts)
+                then return S.nil
                 else do
-                    -- Check if it's a directory
-                    isDir <- liftIO $ doesDirectoryExist fullPathStr
-                    if isDir
-                        then processSubdirectory opts caches visitedTVar dirPath depth fullPath
-                        else return S.nil
+                    -- Check file type
+                    isFile <- liftIO $ doesFileExist fullPathStr
+                    if isFile
+                        then do
+                            -- It's a file - get its info
+                            maybeInfo <- getFileInfoSafe' fullPath fullPathStr  -- Reuse string
+                            case maybeInfo of
+                                Just info -> return $ S.fromPure info
+                                Nothing -> return S.nil
+                        else do
+                            -- Check if it's a directory
+                            isDir <- liftIO $ doesDirectoryExist fullPathStr
+                            if isDir
+                                then processSubdirectory opts caches visitedTVar dirPath depth fullPath
+                                else return S.nil
 
 -- | Process a subdirectory with visited set size limit
 processSubdirectory :: MonadIO m => ScanOptions -> ScanCaches -> TVar VisitedState -> OsPath -> Int -> OsPath -> m (Stream m FileInfo)
 processSubdirectory opts caches visitedTVar parentPath depth fullPath = do
     -- Canonicalize the directory path
     canonResult <- liftIO $ try (CDC.getCanonicalized (canonCache caches) fullPath)
-    case canonResult of
+    case (canonResult :: Either IOException OsPath) of
         Left ex -> do
             fullPathStr <- liftIO $ decodeFS fullPath
             logWarn $ "Cannot canonicalize directory " ++ fullPathStr ++ ": " ++ show (ex :: IOException)
             return S.nil
         Right canonPath -> do
-            !canonPathText <- liftIO $ strictText <$> decodeFS canonPath
+            !canonPathText <- liftIO $ T.pack <$> decodeFS canonPath
             
             -- Check filesystem boundaries
             shouldCross <- if crossMountBoundaries opts
@@ -250,16 +250,24 @@ processSubdirectory opts caches visitedTVar parentPath depth fullPath = do
 -- | Get file information safely with pre-computed path string
 getFileInfoSafe' :: MonadIO m => OsPath -> FilePath -> m (Maybe FileInfo)
 getFileInfoSafe' filePath filePathStr = do
-    result <- liftIO $ try (getFileSize filePathStr)
-    case result of
-        Left ex -> do
-            logDebug $ "Cannot get size of file " ++ filePathStr ++ ": " ++ show (ex :: IOException)
-            return Nothing
-        Right size -> do
-            -- Convert to Text only once and make it strict
-            let !filePathText = strictText filePathStr
-            logDebug $ "File: " ++ filePathStr ++ " -> " ++ show size ++ " bytes"
-            return $ Just $! FileInfo filePathText size
+    -- Skip special filesystems that might cause issues
+    if "/proc/" `isPrefixOf` filePathStr || "/sys/" `isPrefixOf` filePathStr
+        then return Nothing
+        else do
+            result <- liftIO $ try (getFileSize filePathStr)
+            case (result :: Either IOException Integer) of
+                Left ex -> do
+                    -- Only log for non-expected errors (not permission denied)
+                    let errStr = show ex
+                    when (not $ "permission denied" `isInfixOf` errStr) $
+                        logDebug $ "Cannot get size of file " ++ filePathStr ++ ": " ++ errStr
+                    return Nothing
+                Right size -> do
+                    -- Convert to Text and immediately evaluate to avoid keeping FilePath
+                    -- Using seq to force evaluation before returning
+                    let !filePathText = T.pack filePathStr
+                        !info = FileInfo filePathText size
+                    info `seq` return (Just info)
 
 -- | Get file information safely (original interface)
 getFileInfoSafe :: MonadIO m => OsPath -> m (Maybe FileInfo)
