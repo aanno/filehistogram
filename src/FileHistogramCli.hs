@@ -9,12 +9,16 @@ module FileHistogramCli
 
 import System.Environment
 import System.Exit
-import System.IO (openFile, hClose, IOMode(WriteMode), stderr)
+import System.IO (stderr, stdout, hClose)
+import System.OsPath
 import Control.Monad (when)
-import Data.Maybe (isJust)
+import Control.Monad.Catch (MonadThrow)
+import Control.Exception (try)
+import Data.Maybe (isJust, fromJust)
+import Data.Traversable (traverse)
 import FileHistogram
 import FileScanner (defaultScanOptions, ScanOptions(..))
-import Logging (LogLevel(..), LogConfig(..), defaultLogConfig, initLogging, logDebug, logInfo)
+import Logging (LogLevel(..), LogConfig(..), defaultLogConfig, initLogging, logDebug, logInfo, withLogging)
 import ProgressIndicator
 
 -- | Processing modes
@@ -155,56 +159,56 @@ fileHistogramCli :: IO ()
 fileHistogramCli = do
     args <- getArgs
     config <- parseArgs args
-    
-    -- Setup logging
-    logHandle <- case cliLogFile config of
-        Just file -> openFile file WriteMode
-        Nothing -> return stderr
-    
+    -- traverse is `mapM` for `Maybe`, so it will only run if the value is `Just`
+    maybeOsPath <- traverse encodeUtf $ cliLogFile config
+
     let logConfig = defaultLogConfig 
             { minLogLevel = cliLogLevel config
-            , logHandle = logHandle
-            , enableConsole = False  -- Disable double console output
+            , logFile = maybeOsPath
+            , console = Just stdout
             }
-    
-    initLogging logConfig
-    
-    -- Log configuration
-    logInfo "=== file-histogram starting ==="
-    logDebug $ "Command line arguments: " ++ show args
-    logInfo $ "Input directory: " ++ cliInputPath config
-    logInfo $ "Output file: " ++ cliOutputPath config
-    logInfo $ "Processing mode: " ++ show (cliProcessingMode config)
-    logInfo $ "Progress indicators: " ++ show (cliEnableProgressIndicators config)
-    logInfo $ "Log level: " ++ show (cliLogLevel config)
-    logInfo $ "Concurrent workers: " ++ show (cliConcurrentWorkers config)
-    case cliLogFile config of
-        Just file -> logInfo $ "Log file: " ++ file
-        Nothing -> logInfo "Logging to stderr"
-    
-    -- Set scan options with concurrent workers
-    let scanOpts = defaultScanOptions 
-            { followSymlinks = False
-            , crossMountBoundaries = False
-            , concurrentWorkers = cliConcurrentWorkers config
-            }
-    
-    -- Set global progress configuration
-    progressConfig <- progressConfigWithOverride (cliEnableProgressIndicators config)
-    
-    -- Process based on mode
-    case cliProcessingMode config of
-        TraditionalMode -> do
-            logInfo "Using traditional processing"
-            generateHistogramTraditional scanOpts progressConfig (cliInputPath config) (cliOutputPath config)
-        StreamingMode -> do
-            logInfo "Using streaming processing"
-            generateHistogramStreaming scanOpts progressConfig (cliInputPath config) (cliOutputPath config)
-        IncrementalMode -> do
-            logInfo "Using incremental streaming processing (default)"
-            generateHistogramIncremental scanOpts progressConfig (cliInputPath config) (cliOutputPath config)
-    
-    logInfo "=== file-histogram completed successfully ==="
-    
-    -- Close log file if we opened one
-    when (isJust $ cliLogFile config) $ hClose logHandle
+
+    withLogging logConfig $ proceed args config
+
+    -- Close log file if we opened one - not needed with withLogging
+    -- Data.Foldable.for_ logHandle hClose
+    -- when (isJust logHandle) $ hClose $ fromJust logHandle
+
+  where
+    proceed args config = do
+        -- Log configuration
+        logInfo "=== file-histogram starting ==="
+        logDebug $ "Command line arguments: " ++ show args
+        logInfo $ "Input directory: " ++ cliInputPath config
+        logInfo $ "Output file: " ++ cliOutputPath config
+        logInfo $ "Processing mode: " ++ show (cliProcessingMode config)
+        logInfo $ "Progress indicators: " ++ show (cliEnableProgressIndicators config)
+        logInfo $ "Log level: " ++ show (cliLogLevel config)
+        logInfo $ "Concurrent workers: " ++ show (cliConcurrentWorkers config)
+        case cliLogFile config of
+            Just file -> logInfo $ "Log file: " ++ file
+            Nothing -> logInfo "Logging to stderr"
+        
+        -- Set scan options with concurrent workers
+        let scanOpts = defaultScanOptions 
+                { followSymlinks = False
+                , crossMountBoundaries = False
+                , concurrentWorkers = cliConcurrentWorkers config
+                }
+        
+        -- Set global progress configuration
+        progressConfig <- progressConfigWithOverride (cliEnableProgressIndicators config)
+        
+        -- Process based on mode
+        case cliProcessingMode config of
+            TraditionalMode -> do
+                logInfo "Using traditional processing"
+                generateHistogramTraditional scanOpts progressConfig (cliInputPath config) (cliOutputPath config)
+            StreamingMode -> do
+                logInfo "Using streaming processing"
+                generateHistogramStreaming scanOpts progressConfig (cliInputPath config) (cliOutputPath config)
+            IncrementalMode -> do
+                logInfo "Using incremental streaming processing (default)"
+                generateHistogramIncremental scanOpts progressConfig (cliInputPath config) (cliOutputPath config)
+        
+        logInfo "=== file-histogram completed successfully ==="

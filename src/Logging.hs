@@ -6,6 +6,7 @@ module Logging
     , LogConfig(..)
     , defaultLogConfig
     , initLogging
+    , withLogging
     , logMessage
     , logDebug
     , logInfo
@@ -24,7 +25,8 @@ import Control.Monad.IO.Class (liftIO, MonadIO)
 import Control.Monad (when, forM_)
 import Control.Concurrent.STM
 import Control.Concurrent.Async
-import System.IO (hPutStrLn, stderr, Handle)
+import System.IO (hPutStrLn, stderr, Handle, openFile, IOMode (AppendMode), hClose)
+import System.OsPath (decodeFS)
 import Data.Time (getCurrentTime, formatTime, defaultTimeLocale, UTCTime)
 import qualified Streamly.Data.Stream.Prelude as S
 import Streamly.Data.Stream (Stream)
@@ -32,6 +34,8 @@ import Data.IORef
 import System.IO.Unsafe (unsafePerformIO)
 -- Required imports for Fold
 import qualified Streamly.Data.Fold as Fold
+import System.OsPath (OsPath)
+import Control.Exception (bracket)
 
 -- | Log levels in order of severity
 data LogLevel = DEBUG | INFO | WARN | ERROR deriving (Show, Eq, Ord)
@@ -47,20 +51,21 @@ data LogEntry = LogEntry
 -- | Logging configuration
 data LogConfig = LogConfig
     { minLogLevel :: LogLevel
-    , logHandle :: Handle
+    , logFile :: Maybe OsPath
     , enableAsync :: Bool
     , bufferSize :: Int
-    , enableConsole :: Bool  -- Whether to also log to console
+    -- stderr, stdout
+    , console :: Maybe Handle
     } deriving (Eq)
 
 -- | Default logging configuration
 defaultLogConfig :: LogConfig
 defaultLogConfig = LogConfig
     { minLogLevel = INFO
-    , logHandle = stderr
+    , logFile = Nothing
     , enableAsync = True
     , bufferSize = 100
-    , enableConsole = False  -- CHANGED: Default to no console output
+    , console = Nothing
     }
 
 -- Global logging state
@@ -76,6 +81,10 @@ globalLogConfig = unsafePerformIO $ newIORef defaultLogConfig
 globalLogWorker :: IORef (Maybe (Async ()))
 globalLogWorker = unsafePerformIO $ newIORef Nothing
 
+{-# NOINLINE globalLogHandle #-}
+globalLogHandle :: IORef (Maybe Handle)
+globalLogHandle = unsafePerformIO $ newIORef Nothing
+
 -- | Set the minimum log level
 setLogLevel :: MonadIO m => LogLevel -> m ()
 setLogLevel level = liftIO $ do
@@ -89,11 +98,12 @@ getLogLevel = liftIO $ do
     return $ minLogLevel config
 
 -- | Initialize the logging system
-initLogging :: MonadIO m => LogConfig -> m ()
+{-# DEPRECATED initLogging "Use withLogging instead, internal use only" #-}
+initLogging :: MonadIO m => LogConfig -> m (Maybe Handle)
 initLogging config = liftIO $ do
     -- Update the global config FIRST
     writeIORef globalLogConfig config
-    
+
     when (enableAsync config) $ do
         -- Stop existing worker if any
         maybeWorker <- readIORef globalLogWorker
@@ -102,6 +112,23 @@ initLogging config = liftIO $ do
         -- Start new async log worker
         worker <- async $ runLogWorker config
         writeIORef globalLogWorker (Just worker)
+
+    -- Close any existing log handle
+    maybeHandle <- readIORef globalLogHandle
+    forM_ maybeHandle hClose
+
+    case logFile config of
+        Nothing -> do
+            -- No log file configured
+            writeIORef globalLogHandle Nothing
+            return Nothing  -- No handle to return
+
+        Just file -> do
+            -- Open new handle for the log file
+            filePath <- decodeFS file
+            handle <- openFile filePath AppendMode
+            writeIORef globalLogHandle (Just handle)
+            return (Just handle)  -- Return the new handle
 
 -- | Run the log processing worker
 runLogWorker :: LogConfig -> IO ()
@@ -124,13 +151,16 @@ writeLogEntry :: LogConfig -> LogEntry -> IO ()
 writeLogEntry config entry = do
     let timeStr = formatTime defaultTimeLocale "%Y-%m-%d %H:%M:%S" (logTimestamp entry)
         formatted = "[" ++ show (logLevel entry) ++ "] " ++ timeStr ++ " - " ++ logMessageString entry
-    
-    -- Always write to the configured handle (file)
-    hPutStrLn (logHandle config) formatted
-    
-    -- Only write to console if explicitly enabled AND handle is stderr
-    when (enableConsole config && logHandle config == stderr) $
-        hPutStrLn stderr formatted
+
+    logHandle <- readIORef globalLogHandle
+    case logHandle of
+        Just handle -> hPutStrLn handle formatted
+        Nothing -> return ()  -- No handle configured, do nothing
+
+    case console config of
+        Just handle -> hPutStrLn handle formatted
+        Nothing -> return ()  -- No console configured, do nothing
+
 
 -- | Main logging function - FULLY ENABLED
 logMessage :: MonadIO m => LogLevel -> String -> m ()
@@ -167,22 +197,25 @@ logToStream level = S.mapM $ \msg -> liftIO $ do
     return $ LogEntry level timestamp msg "stream"
 
 -- | Run an action with logging, cleaning up afterwards
-withLogging :: MonadIO m => LogConfig -> m a -> m a
-withLogging config action = do
-    -- Initialize with new config (don't save old config)
-    initLogging config
-    
-    -- Run the action
-    result <- action
-    
-    -- Cleanup worker but DON'T restore old config
-    liftIO $ do
-        -- Stop the log worker
-        maybeWorker <- readIORef globalLogWorker
-        forM_ maybeWorker cancel
-        writeIORef globalLogWorker Nothing
-        
-        -- Keep the current config (don't restore old one)
-        -- This prevents console logging from being re-enabled
-    
-    return result
+withLogging :: LogConfig -> IO a -> IO a
+withLogging config action = 
+      bracket
+        (initLogging config)  -- Initialize logging
+        cleanup               -- Cleanup after action
+        (const action)        -- Run the action
+    where 
+        cleanup :: MonadIO m => Maybe Handle -> m ()
+        cleanup maybeHandle = do
+            case maybeHandle of
+                Just handle -> liftIO $ hClose handle  -- Close the log file handle
+                Nothing -> return ()  -- No handle to close
+
+            -- Cleanup worker but DON'T restore old config
+            liftIO $ do
+                -- Stop the log worker
+                maybeWorker <- readIORef globalLogWorker
+                forM_ maybeWorker cancel
+                writeIORef globalLogWorker Nothing
+                
+                -- Keep the current config (don't restore old one)
+                -- This prevents console logging from being re-enabled

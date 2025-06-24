@@ -16,6 +16,7 @@ import Graphics.Vega.VegaLite (VegaLite)
 import System.Info (os)
 import System.Process
 import System.IO (hFlush, stdout)
+import System.OsPath (encodeFS, decodeFS)
 import qualified Streamly.Data.Stream.Prelude as S
 import qualified Streamly.Data.Fold as Fold
 import Control.Monad.IO.Class (MonadIO, liftIO)
@@ -95,6 +96,12 @@ generateHistogramIncremental :: ScanOptions -> ProgressConfig -> FilePath -> Fil
 generateHistogramIncremental scanOpts progressConfig inputPath outputPath = do
     logInfo $ "Scanning files in: " ++ inputPath
     
+    -- Initialize caches once (major performance improvement)
+    caches <- newScanCaches
+    
+    -- Convert FilePath to OsPath for performance
+    inputOsPath <- encodeFS inputPath
+    
     -- Show initial progress
     when (enableProgress progressConfig) $ do
         putStr "Scanning files... "
@@ -114,8 +121,8 @@ generateHistogramIncremental scanOpts progressConfig inputPath outputPath = do
                 (return ([], 0 :: Int))
             else Fold.foldl' (\(sizes, count) size -> (size : sizes, count + 1)) ([], 0 :: Int)
     
-    -- Process files using concurrent streaming
-    (allSizes, count) <- S.fold progressFold (getFileSizesStream scanOpts inputPath)
+    -- Process files using concurrent streaming with caches
+    (allSizes, count) <- S.fold progressFold (getFileSizesStream scanOpts caches inputOsPath)
     
     -- Clear progress line and show final count
     when (enableProgress progressConfig) $ do
@@ -129,9 +136,17 @@ generateHistogramTraditional :: ScanOptions -> ProgressConfig -> FilePath -> Fil
 generateHistogramTraditional scanOpts _ inputPath outputPath = do
     logInfo $ "Scanning files in: " ++ inputPath
     
+    -- Initialize caches
+    caches <- newScanCaches
+    
+    -- Convert FilePath to OsPath
+    inputOsPath <- encodeFS inputPath
+    
     putStrLn "Scanning files..."
     hFlush stdout
-    sizes <- getFileSizes scanOpts inputPath
+    
+    -- Use updated API with caches
+    sizes <- getFileSizes scanOpts caches inputOsPath
     
     processAndSaveHistogram sizes (length sizes) outputPath
 
@@ -139,6 +154,12 @@ generateHistogramTraditional scanOpts _ inputPath outputPath = do
 generateHistogramStreaming :: ScanOptions -> ProgressConfig -> FilePath -> FilePath -> IO ()
 generateHistogramStreaming scanOpts progressConfig inputPath outputPath = do
     logInfo $ "Scanning files in (streaming): " ++ inputPath
+    
+    -- Initialize caches
+    caches <- newScanCaches
+    
+    -- Convert FilePath to OsPath
+    inputOsPath <- encodeFS inputPath
     
     when (enableProgress progressConfig) $ do
         putStr "Streaming files... "
@@ -153,7 +174,7 @@ generateHistogramStreaming scanOpts progressConfig inputPath outputPath = do
         when (enableProgress progressConfig && count `mod` 1000 == 0) $ do
             putStr $ "\rStreaming files... " ++ show count ++ " found"
             hFlush stdout
-        return (size : acc)) (return [])) (getFileSizesStream scanOpts inputPath)
+        return (size : acc)) (return [])) (getFileSizesStream scanOpts caches inputOsPath)
     
     count <- readIORef countRef
     
