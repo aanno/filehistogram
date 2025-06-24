@@ -68,6 +68,7 @@ streamingScanWithProgress opts caches startPath = do
         (return (0, 0))
 
 -- | Batch scan (collect all results first)
+{-# DEPRECATED batchScan "as scanFiles is deprecated" #-}
 batchScan :: ScanOptions -> ScanCaches -> OsPath -> IO ()
 batchScan opts caches startPath = do
     pathStr <- decodeFS startPath

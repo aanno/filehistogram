@@ -249,6 +249,7 @@ getFileSizesStream opts caches path =
     S.mapM (return . fileSize) $ scanFilesStream opts caches path
 
 -- | Scan files and collect all results (non-streaming version)
+{-# DEPRECATED scanFiles "Use scanFilesStream instead" #-}
 scanFiles :: MonadIO m => ScanOptions -> ScanCaches -> OsPath -> m [FileInfo]
 scanFiles opts caches path = do
     files <- S.fold Fold.toList $ scanFilesStream opts caches path
@@ -256,6 +257,7 @@ scanFiles opts caches path = do
     return files
 
 -- | Get file sizes (non-streaming version)
+{-# DEPRECATED getFileSizes "Use getFileSizesStream instead" #-}
 getFileSizes :: MonadIO m => ScanOptions -> ScanCaches -> OsPath -> m [Integer]
 getFileSizes opts caches path = do
     sizes <- S.fold Fold.toList $ getFileSizesStream opts caches path
@@ -263,6 +265,7 @@ getFileSizes opts caches path = do
     return sizes
 
 -- | Convenience function to scan with String path (converts to OsPath)
+{-# DEPRECATED scanFilesFromString "Use scanFilesStreamFromString instead" #-}
 scanFilesFromString :: MonadIO m => ScanOptions -> ScanCaches -> FilePath -> m [FileInfo]
 scanFilesFromString opts caches pathStr = do
     osPath <- liftIO $ encodeFS pathStr
