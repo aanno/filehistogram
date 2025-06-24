@@ -6,6 +6,7 @@ module Logging
     , LogConfig(..)
     , defaultLogConfig
     , initLogging
+    , withLogging
     , logMessage
     , logDebug
     , logInfo
@@ -34,6 +35,7 @@ import System.IO.Unsafe (unsafePerformIO)
 -- Required imports for Fold
 import qualified Streamly.Data.Fold as Fold
 import System.OsPath (OsPath)
+import Control.Exception (bracket)
 
 -- | Log levels in order of severity
 data LogLevel = DEBUG | INFO | WARN | ERROR deriving (Show, Eq, Ord)
@@ -195,18 +197,19 @@ logToStream level = S.mapM $ \msg -> liftIO $ do
     return $ LogEntry level timestamp msg "stream"
 
 -- | Run an action with logging, cleaning up afterwards
-withLogging :: MonadIO m => LogConfig -> m a -> m a
+withLogging :: LogConfig -> IO a -> IO a
 withLogging config action = 
-      proceed
+      bracket
+        (initLogging config)  -- Initialize logging
+        cleanup               -- Cleanup after action
+        (const action)        -- Run the action
     where 
-        -- proceed:: MonadIO m => LogConfig -> m a -> m a
-        proceed = do
-            -- Initialize with new config (don't save old config)
-            maybeHandle <- initLogging config
-            
-            -- Run the action
-            result <- action
-            
+        cleanup :: MonadIO m => Maybe Handle -> m ()
+        cleanup maybeHandle = do
+            case maybeHandle of
+                Just handle -> liftIO $ hClose handle  -- Close the log file handle
+                Nothing -> return ()  -- No handle to close
+
             -- Cleanup worker but DON'T restore old config
             liftIO $ do
                 -- Stop the log worker
@@ -216,5 +219,3 @@ withLogging config action =
                 
                 -- Keep the current config (don't restore old one)
                 -- This prevents console logging from being re-enabled
-            
-            return result

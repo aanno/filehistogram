@@ -18,7 +18,7 @@ import Data.Maybe (isJust, fromJust)
 import Data.Traversable (traverse)
 import FileHistogram
 import FileScanner (defaultScanOptions, ScanOptions(..))
-import Logging (LogLevel(..), LogConfig(..), defaultLogConfig, initLogging, logDebug, logInfo)
+import Logging (LogLevel(..), LogConfig(..), defaultLogConfig, initLogging, logDebug, logInfo, withLogging)
 import ProgressIndicator
 
 -- | Processing modes
@@ -208,4 +208,5 @@ fileHistogramCli = do
     logInfo "=== file-histogram completed successfully ==="
 
     -- Close log file if we opened one
+    -- Data.Foldable.for_ logHandle hClose
     when (isJust logHandle) $ hClose $ fromJust logHandle
