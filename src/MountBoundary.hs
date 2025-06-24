@@ -29,6 +29,7 @@ import qualified System.Win32.Types as Win32
 #else
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
+import Logging (logInfo)
 -- System.MountPoints temporarily disabled due to API compatibility issues
 -- import qualified System.MountPoints as MP
 #endif
@@ -236,7 +237,10 @@ isFileSystemBoundary cache path1 path2 = liftIO $ do
 
 -- Find the mount info that contains the given path
 findMountInfo :: [MountInfo] -> OsPath -> IO (Maybe MountInfo)
-findMountInfo mountInfos path = return $ find (isPathUnderMount path) mountInfos
+findMountInfo mountInfos path = do
+    -- filePath <- decodeFS path
+    -- logInfo $ "Finding mount info for: " ++ filePath ++ " size: " ++ show (length mountInfos)
+    return $ find (isPathUnderMount path) mountInfos
   where
     isPathUnderMount :: OsPath -> MountInfo -> Bool
     isPathUnderMount checkPath mountInfo = 

@@ -33,6 +33,7 @@ import qualified Streamly.Data.Stream as Stream
 import Logging
 import qualified MountBoundary as MB
 import qualified CannonizedDirectoryCache as CDC
+import CannonizedDirectoryCache (cacheStats)
 
 -- | Configuration for file scanning
 data ScanOptions = ScanOptions
@@ -70,8 +71,10 @@ logScanCachesInfo :: ScanCaches -> IO ()
 logScanCachesInfo caches = do
     mountCount <- MB.mountCount (mountCache caches)
     canonSize <- CDC.cacheSize (canonCache caches)
+    cacheStats <- CDC.cacheStats (canonCache caches)
     logInfo $ "Mount cache entries: " ++ show mountCount
     logInfo $ "Canonicalization cache size: " ++ show canonSize
+    logInfo $ "Canonicalization cache stats: " ++ show cacheStats
 
 -- | Information about a scanned file
 data FileInfo = FileInfo
