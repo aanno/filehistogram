@@ -83,6 +83,7 @@ data FileInfo = FileInfo
     } deriving (Show, Eq)
 
 -- | Scan files and return a stream of file information
+{-# SCC scanFilesStream #-}
 scanFilesStream :: MonadIO m => ScanOptions -> ScanCaches -> OsPath -> Stream m FileInfo
 scanFilesStream opts caches path = 
     S.concatEffect $ do
@@ -153,6 +154,7 @@ processItemsConcurrently opts caches visitedTVar dirPath depth items =
         & S.concatMapM (processDirectoryItem opts caches visitedTVar dirPath depth)
 
 -- | Process a single directory item
+{-# SCC processDirectoryItem #-}
 processDirectoryItem :: MonadIO m => ScanOptions -> ScanCaches -> TVar (HashSet Text) -> OsPath -> Int -> OsPath -> m (Stream m FileInfo)
 processDirectoryItem opts caches visitedTVar dirPath depth item = do
     let fullPath = dirPath </> item
@@ -229,11 +231,13 @@ processSubdirectory opts caches visitedTVar parentPath depth fullPath = do
                             return $ scanDirectoryConcurrent opts caches visitedTVar canonPath (depth + 1)
 
 -- | Get file information safely
+{-# SCC getFileInfoSafe #-}
 getFileInfoSafe :: MonadIO m => OsPath -> m (Maybe FileInfo)
 getFileInfoSafe filePath = do
     -- Convert to FilePath for file operations in filepath 1.4
-    filePathStr <- liftIO $ decodeFS filePath
-    result <- liftIO $ try (getFileSize filePathStr)
+
+    filePathStr <- liftIO $ {-# SCC decodeFS_filePath #-} decodeFS filePath
+    result <- liftIO $ try ({-# SCC getFileSize #-} getFileSize filePathStr)
     case result of
         Left ex -> do
             logDebug $ "Cannot get size of file " ++ filePathStr ++ ": " ++ show (ex :: IOException)
