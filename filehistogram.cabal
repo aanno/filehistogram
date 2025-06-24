@@ -50,6 +50,7 @@ library
     , base >=4.7 && <5
     , containers >=0.6.8
     , directory >=1.3.8.5
+    , exceptions >=0.10.7
     , filepath >=1.4
     , hspec >=2.11.12
     , hvega >=0.12.0.7
@@ -89,6 +90,7 @@ executable filehistogram-exe
     , base >=4.7 && <5
     , containers >=0.6.8
     , directory >=1.3.8.5
+    , exceptions >=0.10.7
     , filehistogram
     , filepath >=1.4
     , hspec >=2.11.12
@@ -129,6 +131,7 @@ executable filescanner-exe
     , base >=4.7 && <5
     , containers >=0.6.8
     , directory >=1.3.8.5
+    , exceptions >=0.10.7
     , filehistogram
     , filepath >=1.4
     , hspec >=2.11.12
@@ -169,6 +172,7 @@ test-suite filehistogram-test
     , base >=4.7 && <5
     , containers >=0.6.8
     , directory >=1.3.8.5
+    , exceptions >=0.10.7
     , filehistogram
     , filepath >=1.4
     , hspec
@@ -212,6 +216,7 @@ benchmark filehistogram-bench
     , base >=4.7 && <5
     , containers >=0.6.8
     , directory >=1.3.8.5
+    , exceptions >=0.10.7
     , filehistogram
     , filepath >=1.4
     , gauge

@@ -32,6 +32,7 @@ import Data.IORef
 import System.IO.Unsafe (unsafePerformIO)
 -- Required imports for Fold
 import qualified Streamly.Data.Fold as Fold
+import System.OsPath (OsPath)
 
 -- | Log levels in order of severity
 data LogLevel = DEBUG | INFO | WARN | ERROR deriving (Show, Eq, Ord)
@@ -47,20 +48,21 @@ data LogEntry = LogEntry
 -- | Logging configuration
 data LogConfig = LogConfig
     { minLogLevel :: LogLevel
-    , logHandle :: Handle
+    , logFile :: Maybe OsPath
     , enableAsync :: Bool
     , bufferSize :: Int
-    , enableConsole :: Bool  -- Whether to also log to console
+    -- stderr, stdout
+    , console :: Maybe Handle
     } deriving (Eq)
 
 -- | Default logging configuration
 defaultLogConfig :: LogConfig
 defaultLogConfig = LogConfig
     { minLogLevel = INFO
-    , logHandle = stderr
+    , logFile = Nothing
     , enableAsync = True
     , bufferSize = 100
-    , enableConsole = False  -- CHANGED: Default to no console output
+    , console = Nothing
     }
 
 -- Global logging state
@@ -75,6 +77,10 @@ globalLogConfig = unsafePerformIO $ newIORef defaultLogConfig
 {-# NOINLINE globalLogWorker #-}
 globalLogWorker :: IORef (Maybe (Async ()))
 globalLogWorker = unsafePerformIO $ newIORef Nothing
+
+{-# NOINLINE globalLogHandle #-}
+globalLogHandle :: IORef (Maybe Handle)
+globalLogHandle = unsafePerformIO $ newIORef Nothing
 
 -- | Set the minimum log level
 setLogLevel :: MonadIO m => LogLevel -> m ()
@@ -124,13 +130,16 @@ writeLogEntry :: LogConfig -> LogEntry -> IO ()
 writeLogEntry config entry = do
     let timeStr = formatTime defaultTimeLocale "%Y-%m-%d %H:%M:%S" (logTimestamp entry)
         formatted = "[" ++ show (logLevel entry) ++ "] " ++ timeStr ++ " - " ++ logMessageString entry
-    
-    -- Always write to the configured handle (file)
-    hPutStrLn (logHandle config) formatted
-    
-    -- Only write to console if explicitly enabled AND handle is stderr
-    when (enableConsole config && logHandle config == stderr) $
-        hPutStrLn stderr formatted
+
+    logHandle <- readIORef globalLogHandle
+    case logHandle of
+        Just handle -> hPutStrLn handle formatted
+        Nothing -> return ()  -- No handle configured, do nothing
+
+    case console config of
+        Just handle -> hPutStrLn handle formatted
+        Nothing -> return ()  -- No console configured, do nothing
+
 
 -- | Main logging function - FULLY ENABLED
 logMessage :: MonadIO m => LogLevel -> String -> m ()
