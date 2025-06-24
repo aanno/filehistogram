@@ -1,5 +1,4 @@
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE BangPatterns #-}
 
 module FileScanner 
     ( ScanOptions(..)
@@ -17,6 +16,7 @@ import Control.Exception (try, IOException)
 import Control.Monad.IO.Class (liftIO, MonadIO)
 import Control.Monad (when)
 import Control.Concurrent.STM
+import Control.Concurrent.Async (mapConcurrently)
 import System.OsPath
 import System.OsPath.Types (OsPath)
 import System.Directory
@@ -30,20 +30,21 @@ import qualified Streamly.Data.Stream.Prelude as S
 import qualified Streamly.Data.Fold as Fold
 import Streamly.Data.Stream (Stream)
 import qualified Streamly.Data.Stream as Stream
-import qualified Streamly.FileSystem.Dir as Dir  -- Add this import
-import Data.List (isPrefixOf, isInfixOf)
+import qualified Streamly.FileSystem.Dir as Dir
 import Logging
 import qualified MountBoundary as MB
 import qualified CannonizedDirectoryCache as CDC
 import CannonizedDirectoryCache (cacheStats)
+import qualified System.Posix.Files as P
+import System.Posix.Types (FileID, CIno(..))
+import Data.Word (Word64)
 
 -- | Configuration for file scanning
 data ScanOptions = ScanOptions
     { followSymlinks :: Bool
     , crossMountBoundaries :: Bool
     , maxDepth :: Maybe Int
-    , concurrentWorkers :: Int
-    , maxVisitedSize :: Int  -- Add limit for visited set
+    , concurrentWorkers :: Int  -- Control concurrency level
     } deriving (Show, Eq)
 
 -- | Caches for optimized scanning
@@ -58,8 +59,7 @@ defaultScanOptions = ScanOptions
     { followSymlinks = False
     , crossMountBoundaries = False
     , maxDepth = Nothing
-    , concurrentWorkers = 16
-    , maxVisitedSize = 1000000  -- Limit visited set to 1M entries
+    , concurrentWorkers = 16  -- Higher for I/O bound work
     }
 
 -- | Create new scan caches
@@ -71,19 +71,27 @@ newScanCaches = liftIO $ do
     MB.refreshMountCache mountCache
     return $ ScanCaches mountCache canonCache
 
+logScanCachesInfo :: ScanCaches -> IO ()
+logScanCachesInfo caches = do
+    mountCount <- MB.mountCount (mountCache caches)
+    canonSize <- CDC.cacheSize (canonCache caches)
+    cacheStats <- CDC.cacheStats (canonCache caches)
+    logInfo $ "Mount cache entries: " ++ show mountCount
+    logInfo $ "Canonicalization cache size: " ++ show canonSize
+    logInfo $ "Canonicalization cache stats: " ++ show cacheStats
+
 -- | Information about a scanned file
 data FileInfo = FileInfo
-    { filePath :: {-# UNPACK #-} !Text  -- Strict and unpacked
-    , fileSize :: {-# UNPACK #-} !Integer
+    { filePath :: OsPath       -- Using OsPath instead of Text
+    , fileSize :: Integer
     } deriving (Show, Eq)
 
--- | Visited state with size tracking
-data VisitedState = VisitedState
-    { visitedSet :: !(HashSet Text)
-    , visitedCount :: {-# UNPACK #-} !Int
-    }
+-- | Convert FileID to Word64 for use in HashSet
+fileIDToWord64 :: FileID -> Word64
+fileIDToWord64 (CIno n) = fromIntegral n
 
 -- | Scan files and return a stream of file information
+{-# SCC scanFilesStream #-}
 scanFilesStream :: MonadIO m => ScanOptions -> ScanCaches -> OsPath -> Stream m FileInfo
 scanFilesStream opts caches path = 
     S.concatEffect $ do
@@ -92,7 +100,7 @@ scanFilesStream opts caches path =
         
         -- Canonicalize the path using cache
         canonResult <- liftIO $ try (CDC.getCanonicalized (canonCache caches) path)
-        case (canonResult :: Either IOException OsPath) of
+        case canonResult of
             Left ex -> do
                 logError $ "Cannot canonicalize path " ++ pathStr ++ ": " ++ show (ex :: IOException)
                 return S.nil
@@ -100,180 +108,141 @@ scanFilesStream opts caches path =
                 canonPathStr <- liftIO $ decodeFS canonPath
                 logDebug $ "Canonicalized path: " ++ canonPathStr
                 
-                -- Check if it's a directory
+                -- Check if it's a directory (convert to FilePath for directory operations)
                 isDir <- liftIO $ doesDirectoryExist canonPathStr
                 if isDir
                     then do
-                        -- Create visited state with size limit
-                        canonPathText <- liftIO $ T.pack <$> decodeFS canonPath
-                        visitedTVar <- liftIO $ newTVarIO $ VisitedState 
-                            { visitedSet = HashSet.singleton canonPathText
-                            , visitedCount = 1
-                            }
+                        -- Create thread-safe visited set using STM - store inodes instead of paths
+                        canonInode <- liftIO $ P.fileID <$> P.getFileStatus canonPathStr
+                        visitedTVar <- liftIO $ newTVarIO (HashSet.singleton (fileIDToWord64 canonInode))
                         
-                        -- Start directory scan
-                        return $ scanDirectoryStream opts caches visitedTVar canonPath 0
+                        -- Start directory scan with concurrent processing
+                        return $ scanDirectoryConcurrent opts caches visitedTVar canonPath 0
                     else do
                         -- It's a single file
                         maybeInfo <- getFileInfoSafe canonPath
                         case maybeInfo of
-                            Just info ->                             return $ S.fromPure info
+                            Just info -> return $ S.fromPure info
                             Nothing -> return S.nil
 
--- | Scan a directory using streaming directory traversal
-scanDirectoryStream :: MonadIO m => ScanOptions -> ScanCaches -> TVar VisitedState -> OsPath -> Int -> Stream m FileInfo
-scanDirectoryStream opts caches visitedTVar dirPath depth =
+-- | Scan a directory concurrently, returning a stream of files
+scanDirectoryConcurrent :: MonadIO m => ScanOptions -> ScanCaches -> TVar (HashSet Word64) -> OsPath -> Int -> Stream m FileInfo
+scanDirectoryConcurrent opts caches visitedTVar dirPath depth =
     -- Check depth limit
     if maybe False (< depth) (maxDepth opts) || depth > 50
         then S.nil
         else
-            -- Use streaming directory traversal if available
-            -- This avoids loading all entries into memory at once
-            streamDirectoryEntries dirPath
-                & S.concatMapM (processStreamedItem opts caches visitedTVar dirPath depth)
+            -- Use Streamly's directory streaming instead of listDirectory
+            S.concatEffect $ do
+                dirPathStr <- liftIO $ decodeFS dirPath
+                logDebug $ "Scanning directory (depth " ++ show depth ++ "): " ++ dirPathStr
+                
+                -- Log cache info
+                liftIO $ logScanCachesInfo caches
+                
+                -- Use Streamly's directory streaming
+                -- Dir.read returns Stream IO, so we need to convert it
+                let dirStream = Dir.read dirPathStr
+                        & Stream.mapM encodeFS
+                        & Stream.concatMapM (\item -> liftIO $ processDirectoryItem opts caches visitedTVar dirPath depth item)
+                return $ S.morphInner liftIO dirStream
 
--- | Stream directory entries without loading all into memory
-streamDirectoryEntries :: MonadIO m => OsPath -> Stream m OsPath
-streamDirectoryEntries dirPath = S.concatEffect $ do
-    dirPathStr <- liftIO $ decodeFS dirPath
-    -- Try to use Streamly's directory streaming if available
-    -- Otherwise fall back to chunked reading
-    return $ streamDirectoryChunked dirPathStr 1000  -- Process in chunks of 1000
-
--- | Stream directory in chunks to avoid loading all entries at once
-streamDirectoryChunked :: MonadIO m => FilePath -> Int -> Stream m OsPath
-streamDirectoryChunked dirPathStr chunkSize = S.concatEffect $ do
-    -- This is a simplified version - in production you'd want proper streaming
-    contentsResult <- liftIO $ try (listDirectory dirPathStr)
-    case (contentsResult :: Either IOException [FilePath]) of
-        Left ex -> do
-            logWarn $ "Cannot read directory " ++ dirPathStr ++ ": " ++ show (ex :: IOException)
-            return S.nil
-        Right contents -> do
-            when (length contents > 10000) $ 
-                logWarn $ "Large directory with " ++ show (length contents) ++ " items: " ++ dirPathStr
-            
-            -- Convert to OsPath and stream in chunks
-            osContents <- liftIO $ mapM encodeFS contents
-            return $ S.fromList osContents
-
--- | Process a streamed directory item
-processStreamedItem :: MonadIO m => ScanOptions -> ScanCaches -> TVar VisitedState -> OsPath -> Int -> OsPath -> m (Stream m FileInfo)
-processStreamedItem opts caches visitedTVar dirPath depth item = do
-    let !fullPath = dirPath </> item  -- Strict evaluation
+-- | Process a single directory item
+{-# SCC processDirectoryItem #-}
+processDirectoryItem :: MonadIO m => ScanOptions -> ScanCaches -> TVar (HashSet Word64) -> OsPath -> Int -> OsPath -> m (Stream m FileInfo)
+processDirectoryItem opts caches visitedTVar dirPath depth item = do
+    let fullPath = dirPath </> item
     
-    -- Get path string only once and reuse
-    !fullPathStr <- liftIO $ decodeFS fullPath
+    -- Convert to FilePath for file operations
+    fullPathStr <- liftIO $ decodeFS fullPath
     
-    -- Skip special filesystems early
-    if "/proc/" `isPrefixOf` fullPathStr || "/sys/" `isPrefixOf` fullPathStr
+    -- Check if it's a symbolic link first
+    isLink <- liftIO $ pathIsSymbolicLink fullPathStr
+    
+    if isLink && not (followSymlinks opts)
         then return S.nil
         else do
-            -- Check if it's a symbolic link first
-            isLink <- liftIO $ pathIsSymbolicLink fullPathStr
-            
-            if isLink && not (followSymlinks opts)
-                then return S.nil
+            -- Check file type
+            isFile <- liftIO $ doesFileExist fullPathStr
+            if isFile
+                then do
+                    -- It's a file - get its info
+                    maybeInfo <- getFileInfoSafe fullPath
+                    case maybeInfo of
+                        Just info -> return $ S.fromPure info
+                        Nothing -> return S.nil
                 else do
-                    -- Check file type
-                    isFile <- liftIO $ doesFileExist fullPathStr
-                    if isFile
-                        then do
-                            -- It's a file - get its info
-                            maybeInfo <- getFileInfoSafe' fullPath fullPathStr  -- Reuse string
-                            case maybeInfo of
-                                Just info -> return $ S.fromPure info
-                                Nothing -> return S.nil
-                        else do
-                            -- Check if it's a directory
-                            isDir <- liftIO $ doesDirectoryExist fullPathStr
-                            if isDir
-                                then processSubdirectory opts caches visitedTVar dirPath depth fullPath
-                                else return S.nil
+                    -- Check if it's a directory
+                    isDir <- liftIO $ doesDirectoryExist fullPathStr
+                    if isDir
+                        then processSubdirectory opts caches visitedTVar dirPath depth fullPath
+                        else return S.nil
 
--- | Process a subdirectory with visited set size limit
-processSubdirectory :: MonadIO m => ScanOptions -> ScanCaches -> TVar VisitedState -> OsPath -> Int -> OsPath -> m (Stream m FileInfo)
+-- | Process a subdirectory
+processSubdirectory :: MonadIO m => ScanOptions -> ScanCaches -> TVar (HashSet Word64) -> OsPath -> Int -> OsPath -> m (Stream m FileInfo)
 processSubdirectory opts caches visitedTVar parentPath depth fullPath = do
-    -- Canonicalize the directory path
+    -- Canonicalize the directory path using cache
     canonResult <- liftIO $ try (CDC.getCanonicalized (canonCache caches) fullPath)
-    case (canonResult :: Either IOException OsPath) of
+    case canonResult of
         Left ex -> do
             fullPathStr <- liftIO $ decodeFS fullPath
             logWarn $ "Cannot canonicalize directory " ++ fullPathStr ++ ": " ++ show (ex :: IOException)
             return S.nil
         Right canonPath -> do
-            !canonPathText <- liftIO $ T.pack <$> decodeFS canonPath
+            canonPathStr <- liftIO $ decodeFS canonPath
             
-            -- Check filesystem boundaries
-            shouldCross <- if crossMountBoundaries opts
-                then return True
-                else do
-                    crossesBoundary <- liftIO $ MB.isFileSystemBoundary (mountCache caches) parentPath canonPath
-                    return (not crossesBoundary)
-            
-            if not shouldCross
-                then do
-                    canonPathStr <- liftIO $ decodeFS canonPath
-                    logInfo $ "Skipping filesystem boundary: " ++ canonPathStr
-                    return S.nil
-                else do
-                    -- Check if already visited with size limit
-                    shouldVisit <- liftIO $ atomically $ do
-                        state <- readTVar visitedTVar
-                        let visited = visitedSet state
-                            count = visitedCount state
-                        
-                        if HashSet.member canonPathText visited
-                            then return False
-                            else if count >= maxVisitedSize opts
-                                then return False  -- Stop visiting new directories if limit reached
-                                else do
-                                    writeTVar visitedTVar $ VisitedState
-                                        { visitedSet = HashSet.insert canonPathText visited
-                                        , visitedCount = count + 1
-                                        }
-                                    return True
-                    
-                    if not shouldVisit
-                        then do
-                            -- Check if we hit the size limit
-                            hitLimit <- liftIO $ atomically $ do
-                                state <- readTVar visitedTVar
-                                return $ visitedCount state >= maxVisitedSize opts
-                            when hitLimit $
-                                logWarn "Visited set size limit reached, skipping new directories"
-                            return S.nil
-                        else
-                            -- Recursively scan the subdirectory
-                            return $ scanDirectoryStream opts caches visitedTVar canonPath (depth + 1)
-
--- | Get file information safely with pre-computed path string
-getFileInfoSafe' :: MonadIO m => OsPath -> FilePath -> m (Maybe FileInfo)
-getFileInfoSafe' filePath filePathStr = do
-    -- Skip special filesystems that might cause issues
-    if "/proc/" `isPrefixOf` filePathStr || "/sys/" `isPrefixOf` filePathStr
-        then return Nothing
-        else do
-            result <- liftIO $ try (getFileSize filePathStr)
-            case (result :: Either IOException Integer) of
+            -- Get inode for visited check
+            inodeResult <- liftIO $ try (P.fileID <$> P.getFileStatus canonPathStr)
+            case inodeResult of
                 Left ex -> do
-                    -- Only log for non-expected errors (not permission denied)
-                    let errStr = show ex
-                    when (not $ "permission denied" `isInfixOf` errStr) $
-                        logDebug $ "Cannot get size of file " ++ filePathStr ++ ": " ++ errStr
-                    return Nothing
-                Right size -> do
-                    -- Convert to Text and immediately evaluate to avoid keeping FilePath
-                    -- Using seq to force evaluation before returning
-                    let !filePathText = T.pack filePathStr
-                        !info = FileInfo filePathText size
-                    info `seq` return (Just info)
+                    logWarn $ "Cannot stat directory " ++ canonPathStr ++ ": " ++ show (ex :: IOException)
+                    return S.nil
+                Right inode -> do
+                    -- Check filesystem boundaries using the mount cache
+                    shouldCross <- if crossMountBoundaries opts
+                        then return True
+                        else do
+                            -- Check if crossing filesystem boundary
+                            crossesBoundary <- liftIO $ MB.isFileSystemBoundary (mountCache caches) parentPath canonPath
+                            return (not crossesBoundary)
+                    
+                    if not shouldCross
+                        then do
+                            logInfo $ "Skipping filesystem boundary: " ++ canonPathStr
+                            return S.nil
+                        else do
+                            -- Check if already visited using inode (thread-safe)
+                            alreadyVisited <- liftIO $ atomically $ do
+                                visited <- readTVar visitedTVar
+                                let inodeWord64 = fileIDToWord64 inode
+                                if HashSet.member inodeWord64 visited
+                                    then return True
+                                    else do
+                                        writeTVar visitedTVar (HashSet.insert inodeWord64 visited)
+                                        return False
+                            
+                            if alreadyVisited
+                                then do
+                                    logDebug $ "Already visited, skipping: " ++ canonPathStr
+                                    return S.nil
+                                else
+                                    -- Recursively scan the subdirectory
+                                    return $ scanDirectoryConcurrent opts caches visitedTVar canonPath (depth + 1)
 
--- | Get file information safely (original interface)
+-- | Get file information safely
+{-# SCC getFileInfoSafe #-}
 getFileInfoSafe :: MonadIO m => OsPath -> m (Maybe FileInfo)
 getFileInfoSafe filePath = do
-    !filePathStr <- liftIO $ decodeFS filePath
-    getFileInfoSafe' filePath filePathStr
+    -- Convert to FilePath for file operations
+    filePathStr <- liftIO $ {-# SCC decodeFS_filePath #-} decodeFS filePath
+    result <- liftIO $ try ({-# SCC getFileSize #-} getFileSize filePathStr)
+    case result of
+        Left ex -> do
+            logDebug $ "Cannot get size of file " ++ filePathStr ++ ": " ++ show (ex :: IOException)
+            return Nothing
+        Right size -> do
+            logDebug $ "File: " ++ filePathStr ++ " -> " ++ show size ++ " bytes"
+            return $ Just $ FileInfo filePath size  -- Store OsPath directly
 
 -- | Get file sizes as a stream
 getFileSizesStream :: MonadIO m => ScanOptions -> ScanCaches -> OsPath -> Stream m Integer
@@ -295,6 +264,13 @@ getFileSizes opts caches path = do
     sizes <- S.fold Fold.toList $ getFileSizesStream opts caches path
     logInfo $ "Collected " ++ show (length sizes) ++ " file sizes"
     return sizes
+
+-- | Convenience function to scan with String path (converts to OsPath)
+{-# DEPRECATED scanFilesFromString "Use scanFilesStreamFromString instead" #-}
+scanFilesFromString :: MonadIO m => ScanOptions -> ScanCaches -> FilePath -> m [FileInfo]
+scanFilesFromString opts caches pathStr = do
+    osPath <- liftIO $ encodeFS pathStr
+    scanFiles opts caches osPath
 
 -- | Convenience function to scan stream with String path
 scanFilesStreamFromString :: MonadIO m => ScanOptions -> ScanCaches -> FilePath -> Stream m FileInfo

@@ -13,6 +13,7 @@ import System.OsPath
 import qualified Streamly.Data.Stream.Prelude as S
 import qualified Streamly.Data.Fold as Fold
 import Text.Printf (printf)
+import System.OsPath (decodeFS)
 
 import FileScanner
 import qualified CannonizedDirectoryCache as CDC
@@ -20,10 +21,9 @@ import qualified MountBoundary as MB
 
 -- | Print file information
 printFileInfo :: FileInfo -> IO ()
-printFileInfo fileInfo = do
-    let path = filePath fileInfo
-        size = fileSize fileInfo
-    T.putStrLn $ T.concat [path, " (", T.pack (show size), " bytes)"]
+printFileInfo (FileInfo path size) = do
+    pathStr <- decodeFS path  -- Convert OsPath to String
+    T.putStrLn $ T.concat [T.pack pathStr, " (", T.pack (show size), " bytes)"]
 
 -- | Print cache statistics
 printCacheStats :: ScanCaches -> IO ()
