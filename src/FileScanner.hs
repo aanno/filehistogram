@@ -66,6 +66,13 @@ newScanCaches = liftIO $ do
     MB.refreshMountCache mountCache
     return $ ScanCaches mountCache canonCache
 
+logScanCachesInfo :: ScanCaches -> IO ()
+logScanCachesInfo caches = do
+    mountCount <- MB.mountCount (mountCache caches)
+    canonSize <- CDC.cacheSize (canonCache caches)
+    logInfo $ "Mount cache entries: " ++ show mountCount
+    logInfo $ "Canonicalization cache size: " ++ show canonSize
+
 -- | Information about a scanned file
 data FileInfo = FileInfo
     { filePath :: Text
@@ -123,6 +130,9 @@ scanDirectoryConcurrent opts caches visitedTVar dirPath depth =
                         logWarn $ "Cannot read directory " ++ dirPathStr ++ ": " ++ show (ex :: IOException)
                         return S.nil
                     Right contents -> do
+                        -- Log cache info
+                        liftIO $ do
+                            logScanCachesInfo caches
                         when (length contents > 10000) $ 
                             logWarn $ "Large directory with " ++ show (length contents) ++ " items: " ++ dirPathStr
                         
@@ -211,6 +221,7 @@ processSubdirectory opts caches visitedTVar parentPath depth fullPath = do
                             logDebug $ "Already visited, skipping: " ++ canonPathStr
                             return S.nil
                         else
+                            -- logScanCachesInfo caches
                             -- Recursively scan the subdirectory
                             return $ scanDirectoryConcurrent opts caches visitedTVar canonPath (depth + 1)
 

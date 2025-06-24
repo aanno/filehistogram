@@ -10,6 +10,7 @@ module MountBoundary
   , getAllMountPoints
   , getMountPointFor
   , clearMountCache
+  , mountCount
   ) where
 
 import Control.Monad.IO.Class (MonadIO, liftIO)
@@ -46,6 +47,11 @@ newtype MountCache = MountCache (IORef (Set MountInfo))
 -- Create a new mount cache
 newMountCache :: MonadIO m => m MountCache
 newMountCache = liftIO $ MountCache <$> newIORef Set.empty
+
+mountCount :: MonadIO m => MountCache -> m Int
+mountCount (MountCache cacheRef) = liftIO $ do
+    cache <- readIORef cacheRef
+    return (Set.size cache)
 
 -- Refresh the mount cache by reading current mount points
 refreshMountCache :: MonadIO m => MountCache -> m ()
