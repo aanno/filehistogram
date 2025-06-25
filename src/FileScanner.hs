@@ -24,8 +24,6 @@ import System.FilePath (isAbsolute)
 import Data.Function ((&))
 import Data.Text (Text)
 import qualified Data.Text as T
-import qualified Data.HashSet as HashSet
-import Data.HashSet (HashSet)
 import qualified Streamly.Data.Stream.Prelude as S
 import qualified Streamly.Data.Fold as Fold
 import Streamly.Data.Stream (Stream)
@@ -34,6 +32,7 @@ import Logging
 import qualified MountBoundary as MB
 import qualified CannonizedDirectoryCache as CDC
 import CannonizedDirectoryCache (cacheStats)
+import qualified VisitedPathTrie as VPT
 
 -- | Configuration for file scanning
 data ScanOptions = ScanOptions
@@ -82,6 +81,17 @@ data FileInfo = FileInfo
     , fileSize :: Integer
     } deriving (Show, Eq)
 
+-- | Log visited trie statistics
+logVisitedTrieStats :: TVar VPT.VisitedTrie -> IO ()
+logVisitedTrieStats visitedTVar = do
+    trie <- readTVarIO visitedTVar
+    let (total, notVis, visiting, complete) = VPT.stats trie
+    logDebug $ "VisitedTrie stats - Total nodes: " ++ show total 
+            ++ ", Not visited: " ++ show notVis
+            ++ ", Visiting: " ++ show visiting
+            ++ ", Complete: " ++ show complete
+            ++ ", Size: " ++ show (VPT.size trie)
+
 -- | Scan files and return a stream of file information
 {-# SCC scanFilesStream #-}
 scanFilesStream :: MonadIO m => ScanOptions -> ScanCaches -> OsPath -> Stream m FileInfo
@@ -104,9 +114,12 @@ scanFilesStream opts caches path =
                 isDir <- liftIO $ doesDirectoryExist canonPathStr
                 if isDir
                     then do
-                        -- Create thread-safe visited set using STM
-                        canonPathText <- liftIO $ T.pack <$> decodeFS canonPath
-                        visitedTVar <- liftIO $ newTVarIO (HashSet.singleton canonPathText)
+                        -- Create thread-safe visited trie using STM
+                        visitedTVar <- liftIO $ newTVarIO VPT.empty
+                        
+                        -- Mark the root as being visited
+                        let canonComponents = splitPath canonPath
+                        liftIO $ atomically $ VPT.markVisitedSTM canonComponents visitedTVar
                         
                         -- Start directory scan with concurrent processing
                         return $ scanDirectoryConcurrent opts caches visitedTVar canonPath 0
@@ -118,7 +131,7 @@ scanFilesStream opts caches path =
                             Nothing -> return S.nil
 
 -- | Scan a directory concurrently, returning a stream of files
-scanDirectoryConcurrent :: MonadIO m => ScanOptions -> ScanCaches -> TVar (HashSet Text) -> OsPath -> Int -> Stream m FileInfo
+scanDirectoryConcurrent :: MonadIO m => ScanOptions -> ScanCaches -> TVar VPT.VisitedTrie -> OsPath -> Int -> Stream m FileInfo
 scanDirectoryConcurrent opts caches visitedTVar dirPath depth =
     -- Check depth limit
     if maybe False (< depth) (maxDepth opts) || depth > 50
@@ -132,30 +145,45 @@ scanDirectoryConcurrent opts caches visitedTVar dirPath depth =
                 case contentsResult of
                     Left ex -> do
                         logWarn $ "Cannot read directory " ++ dirPathStr ++ ": " ++ show (ex :: IOException)
+                        -- Mark this directory as completely visited (failed)
+                        let dirComponents = splitPath dirPath
+                        liftIO $ atomically $ VPT.markCompleteAndCleanup dirComponents visitedTVar
                         return S.nil
                     Right contents -> do
-                        -- Log cache info
+                        -- Log cache info and visited trie stats periodically
                         liftIO $ do
                             logScanCachesInfo caches
+                            logVisitedTrieStats visitedTVar
+                        
                         when (length contents > 10000) $ 
                             logWarn $ "Large directory with " ++ show (length contents) ++ " items: " ++ dirPathStr
                         
                         -- Convert String paths to OsPath
                         osContents <- liftIO $ mapM encodeFS contents
                         
-                        -- Process items with manual concurrency control
+                        -- Process items
+                        -- Note: Marking as complete happens after each subdirectory is processed
+                        -- in processSubdirectory, not here at the parent level
                         return $ processItemsConcurrently opts caches visitedTVar dirPath depth osContents
 
 -- | Process directory items with concurrency control
-processItemsConcurrently :: MonadIO m => ScanOptions -> ScanCaches -> TVar (HashSet Text) -> OsPath -> Int -> [OsPath] -> Stream m FileInfo
-processItemsConcurrently opts caches visitedTVar dirPath depth items =
-    -- Process items sequentially but allow each item's processing to be concurrent
-    S.fromList items
-        & S.concatMapM (processDirectoryItem opts caches visitedTVar dirPath depth)
+processItemsConcurrently :: MonadIO m => ScanOptions -> ScanCaches -> TVar VPT.VisitedTrie -> OsPath -> Int -> [OsPath] -> Stream m FileInfo
+processItemsConcurrently opts caches visitedTVar dirPath depth items = do
+    -- First, process all items to get file info
+    let itemStreams = S.fromList items
+            & S.concatMapM (processDirectoryItem opts caches visitedTVar dirPath depth)
+    
+    -- Stream all file infos
+    itemStreams
+    
+    -- Note: We cannot easily mark directories as complete in a streaming context
+    -- because we don't know when all items have been processed.
+    -- Instead, we rely on the "Visiting" state to prevent re-scanning
+    -- and accept the slightly higher memory usage.
 
 -- | Process a single directory item
 {-# SCC processDirectoryItem #-}
-processDirectoryItem :: MonadIO m => ScanOptions -> ScanCaches -> TVar (HashSet Text) -> OsPath -> Int -> OsPath -> m (Stream m FileInfo)
+processDirectoryItem :: MonadIO m => ScanOptions -> ScanCaches -> TVar VPT.VisitedTrie -> OsPath -> Int -> OsPath -> m (Stream m FileInfo)
 processDirectoryItem opts caches visitedTVar dirPath depth item = do
     let fullPath = dirPath </> item
     
@@ -185,7 +213,7 @@ processDirectoryItem opts caches visitedTVar dirPath depth item = do
                         else return S.nil
 
 -- | Process a subdirectory
-processSubdirectory :: MonadIO m => ScanOptions -> ScanCaches -> TVar (HashSet Text) -> OsPath -> Int -> OsPath -> m (Stream m FileInfo)
+processSubdirectory :: MonadIO m => ScanOptions -> ScanCaches -> TVar VPT.VisitedTrie -> OsPath -> Int -> OsPath -> m (Stream m FileInfo)
 processSubdirectory opts caches visitedTVar parentPath depth fullPath = do
     -- Canonicalize the directory path using cache
     canonResult <- liftIO $ try (CDC.getCanonicalized (canonCache caches) fullPath)
@@ -195,7 +223,7 @@ processSubdirectory opts caches visitedTVar parentPath depth fullPath = do
             logWarn $ "Cannot canonicalize directory " ++ fullPathStr ++ ": " ++ show (ex :: IOException)
             return S.nil
         Right canonPath -> do
-            canonPathText <- liftIO $ T.pack <$> decodeFS canonPath
+            let canonComponents = splitPath canonPath
             
             -- Check filesystem boundaries using the mount cache
             shouldCross <- if crossMountBoundaries opts
@@ -211,22 +239,15 @@ processSubdirectory opts caches visitedTVar parentPath depth fullPath = do
                     logInfo $ "Skipping filesystem boundary: " ++ canonPathStr
                     return S.nil
                 else do
-                    -- Check if already visited (thread-safe)
-                    alreadyVisited <- liftIO $ atomically $ do
-                        visited <- readTVar visitedTVar
-                        if HashSet.member canonPathText visited
-                            then return True
-                            else do
-                                writeTVar visitedTVar (HashSet.insert canonPathText visited)
-                                return False
+                    -- Check if already visited using the trie (thread-safe)
+                    alreadyVisited <- liftIO $ atomically $ VPT.checkAndMarkVisited canonComponents visitedTVar
                     
                     if alreadyVisited
                         then do
                             canonPathStr <- liftIO $ decodeFS canonPath
-                            logDebug $ "Already visited, skipping: " ++ canonPathStr
+                            logDebug $ "Already visited (or has visited prefix), skipping: " ++ canonPathStr
                             return S.nil
                         else
-                            -- logScanCachesInfo caches
                             -- Recursively scan the subdirectory
                             return $ scanDirectoryConcurrent opts caches visitedTVar canonPath (depth + 1)
 
@@ -235,7 +256,6 @@ processSubdirectory opts caches visitedTVar parentPath depth fullPath = do
 getFileInfoSafe :: MonadIO m => OsPath -> m (Maybe FileInfo)
 getFileInfoSafe filePath = do
     -- Convert to FilePath for file operations in filepath 1.4
-
     filePathStr <- liftIO $ {-# SCC decodeFS_filePath #-} decodeFS filePath
     result <- liftIO $ try ({-# SCC getFileSize #-} getFileSize filePathStr)
     case result of

@@ -33,6 +33,7 @@ library
       Logging
       MountBoundary
       ProgressIndicator
+      VisitedPathTrie
   other-modules:
       Paths_filehistogram
   autogen-modules:
