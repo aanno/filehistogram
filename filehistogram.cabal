@@ -32,6 +32,7 @@ library
       Lib
       Logging
       MountBoundary
+      OsPathInternCache
       ProgressIndicator
       VisitedPathTrie
   other-modules:
@@ -53,6 +54,7 @@ library
     , directory >=1.3.8.5
     , exceptions >=0.10.7
     , filepath >=1.4
+    , hashable >=1.4.7.0
     , hspec >=2.11.12
     , hvega >=0.12.0.7
     , lrucache >=1.2 && <2
@@ -94,6 +96,7 @@ executable filehistogram-exe
     , exceptions >=0.10.7
     , filehistogram
     , filepath >=1.4
+    , hashable >=1.4.7.0
     , hspec >=2.11.12
     , hvega >=0.12.0.7
     , lrucache >=1.2 && <2
@@ -135,6 +138,7 @@ executable filescanner-exe
     , exceptions >=0.10.7
     , filehistogram
     , filepath >=1.4
+    , hashable >=1.4.7.0
     , hspec >=2.11.12
     , hvega >=0.12.0.7
     , lrucache >=1.2 && <2
@@ -176,6 +180,7 @@ test-suite filehistogram-test
     , exceptions >=0.10.7
     , filehistogram
     , filepath >=1.4
+    , hashable >=1.4.7.0
     , hspec
     , hvega >=0.12.0.7
     , lrucache >=1.2 && <2
@@ -221,6 +226,7 @@ benchmark filehistogram-bench
     , filehistogram
     , filepath >=1.4
     , gauge
+    , hashable >=1.4.7.0
     , hspec >=2.11.12
     , hvega >=0.12.0.7
     , lrucache >=1.2 && <2

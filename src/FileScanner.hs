@@ -36,6 +36,7 @@ import qualified MountBoundary as MB
 import qualified CannonizedDirectoryCache as CDC
 import CannonizedDirectoryCache (cacheStats)
 import qualified VisitedPathTrie as VPT
+import qualified OsPathInternCache as OIC
 import Data.Either (fromRight)
 
 -- | Configuration for file scanning
@@ -50,6 +51,7 @@ data ScanOptions = ScanOptions
 data ScanCaches = ScanCaches
     { mountCache :: MB.MountCache
     , canonCache :: CDC.CannonizedDirectoryCache
+    , internCache :: OIC.InternCache  -- New: intern cache for OsPath values
     }
 
 -- | Default scan options (safe defaults)
@@ -66,18 +68,23 @@ newScanCaches :: MonadIO m => m ScanCaches
 newScanCaches = liftIO $ do
     mountCache <- MB.newMountCache
     canonCache <- CDC.newCache
+    internCache <- OIC.newInternCache
     -- Pre-populate mount cache
     MB.refreshMountCache mountCache
-    return $ ScanCaches mountCache canonCache
+    return $ ScanCaches mountCache canonCache internCache
 
 logScanCachesInfo :: ScanCaches -> IO ()
 logScanCachesInfo caches = do
     mountCount <- MB.mountCount (mountCache caches)
     canonSize <- CDC.cacheSize (canonCache caches)
     cacheStats <- CDC.cacheStats (canonCache caches)
+    internSize <- OIC.cacheSize (internCache caches)
+    internStats <- OIC.cacheStats (internCache caches)
     logInfo $ "Mount cache entries: " ++ show mountCount
     logInfo $ "Canonicalization cache size: " ++ show canonSize
     logInfo $ "Canonicalization cache stats: " ++ show cacheStats
+    logInfo $ "Intern cache size: " ++ show internSize
+    logInfo $ "Intern cache stats: " ++ show internStats
 
 -- | Information about a scanned file
 data FileInfo = FileInfo
@@ -129,7 +136,9 @@ scanFilesStream opts caches path =
                 logError $ "Cannot canonicalize path " ++ show path ++ ": " ++ show (ex :: IOException)
                 return S.nil
             Right canonPath -> do
-                canonPathStr <- liftIO $ decodeFS canonPath
+                -- Intern the canonical path
+                internedCanonPath <- liftIO $ OIC.intern (internCache caches) canonPath
+                canonPathStr <- liftIO $ decodeFS internedCanonPath
                 logDebug $ "Canonicalized path: " ++ canonPathStr
                 
                 -- Check if it's a directory (convert to FilePath for directory operations)
@@ -139,15 +148,16 @@ scanFilesStream opts caches path =
                         -- Create thread-safe visited trie using STM
                         visitedTVar <- liftIO $ newTVarIO VPT.empty
                         
-                        -- Mark the root as being visited
-                        let canonComponents = splitPath canonPath
-                        liftIO $ atomically $ VPT.markVisitedSTM canonComponents visitedTVar
+                        -- Mark the root as being visited (with interned components)
+                        let canonComponents = splitPath internedCanonPath
+                        internedComponents <- liftIO $ OIC.internComponents (internCache caches) canonComponents
+                        liftIO $ atomically $ VPT.markVisitedSTM internedComponents visitedTVar
                         
                         -- Start directory scan with concurrent processing
-                        return $ scanDirectoryConcurrent opts caches visitedTVar canonPath 0
+                        return $ scanDirectoryConcurrent opts caches visitedTVar internedCanonPath 0
                     else do
                         -- It's a single file
-                        maybeInfo <- getFileInfoSafe canonPath
+                        maybeInfo <- getFileInfoSafe caches internedCanonPath
                         case maybeInfo of
                             Just info -> return $ S.fromPure info
                             Nothing -> return S.nil
@@ -169,7 +179,8 @@ scanDirectoryConcurrent opts caches visitedTVar dirPath depth =
                         logWarn $ "Cannot read directory " ++ dirPathStr ++ ": " ++ show (ex :: IOException)
                         -- Mark this directory as completely visited (failed)
                         let dirComponents = splitPath dirPath
-                        liftIO $ atomically $ VPT.markCompleteAndCleanup dirComponents visitedTVar
+                        internedComponents <- liftIO $ OIC.internComponents (internCache caches) dirComponents
+                        liftIO $ atomically $ VPT.markCompleteAndCleanup internedComponents visitedTVar
                         return S.nil
                     Right contents -> do
                         -- Log cache info and visited trie stats periodically
@@ -180,8 +191,10 @@ scanDirectoryConcurrent opts caches visitedTVar dirPath depth =
                         when (length contents > 10000) $ 
                             logWarn $ "Large directory with " ++ show (length contents) ++ " items: " ++ dirPathStr
                         
-                        -- Convert String paths to OsPath
-                        osContents <- liftIO $ mapM encodeFS contents
+                        -- Convert String paths to OsPath and intern them
+                        osContents <- liftIO $ do
+                            paths <- mapM encodeFS contents
+                            OIC.internList (internCache caches) paths
                         
                         -- Process items
                         -- Note: Marking as complete happens after each subdirectory is processed
@@ -207,10 +220,12 @@ processItemsConcurrently opts caches visitedTVar dirPath depth items = do
 {-# SCC processDirectoryItem #-}
 processDirectoryItem :: MonadIO m => ScanOptions -> ScanCaches -> TVar VPT.VisitedTrie -> OsPath -> Int -> OsPath -> m (Stream m FileInfo)
 processDirectoryItem opts caches visitedTVar dirPath depth item = do
+    -- Intern the full path
     let fullPath = dirPath </> item
+    internedFullPath <- liftIO $ OIC.intern (internCache caches) fullPath
     
     -- Convert to FilePath for file operations
-    fullPathStr <- liftIO $ decodeFS fullPath
+    fullPathStr <- liftIO $ decodeFS internedFullPath
     
     -- Check if it's a symbolic link first
     isLink <- liftIO $ pathIsSymbolicLink fullPathStr
@@ -223,7 +238,7 @@ processDirectoryItem opts caches visitedTVar dirPath depth item = do
             if isFile
                 then do
                     -- It's a file - get its info
-                    maybeInfo <- getFileInfoSafe fullPath
+                    maybeInfo <- getFileInfoSafe caches internedFullPath
                     case maybeInfo of
                         Just info -> return $ S.fromPure info
                         Nothing -> return S.nil
@@ -231,7 +246,7 @@ processDirectoryItem opts caches visitedTVar dirPath depth item = do
                     -- Check if it's a directory
                     isDir <- liftIO $ doesDirectoryExist fullPathStr
                     if isDir
-                        then processSubdirectory opts caches visitedTVar dirPath depth fullPath
+                        then processSubdirectory opts caches visitedTVar dirPath depth internedFullPath
                         else return S.nil
 
 -- | Process a subdirectory
@@ -244,36 +259,39 @@ processSubdirectory opts caches visitedTVar parentPath depth fullPath = do
             logWarn $ "Cannot canonicalize directory " ++ show fullPath ++ ": " ++ show (ex :: IOException)
             return S.nil
         Right canonPath -> do
-            let canonComponents = splitPath canonPath
+            -- Intern the canonical path and its components
+            internedCanonPath <- liftIO $ OIC.intern (internCache caches) canonPath
+            let canonComponents = splitPath internedCanonPath
+            internedComponents <- liftIO $ OIC.internComponents (internCache caches) canonComponents
             
             -- Check filesystem boundaries using the mount cache
             shouldCross <- if crossMountBoundaries opts
                 then return True
                 else do
                     -- Check if crossing filesystem boundary
-                    crossesBoundary <- liftIO $ MB.isFileSystemBoundary (mountCache caches) parentPath canonPath
+                    crossesBoundary <- liftIO $ MB.isFileSystemBoundary (mountCache caches) parentPath internedCanonPath
                     return (not crossesBoundary)
             
             if not shouldCross
                 then do
-                    logInfo $ "Skipping filesystem boundary: " ++ show canonPath
+                    logInfo $ "Skipping filesystem boundary: " ++ show internedCanonPath
                     return S.nil
                 else do
                     -- Check if already visited using the trie (thread-safe)
-                    alreadyVisited <- liftIO $ atomically $ VPT.checkAndMarkVisited canonComponents visitedTVar
+                    alreadyVisited <- liftIO $ atomically $ VPT.checkAndMarkVisited internedComponents visitedTVar
                     
                     if alreadyVisited
                         then do
-                            logDebug $ "Already visited (or has visited prefix), skipping: " ++ show canonPath
+                            logDebug $ "Already visited (or has visited prefix), skipping: " ++ show internedCanonPath
                             return S.nil
                         else
                             -- Recursively scan the subdirectory
-                            return $ scanDirectoryConcurrent opts caches visitedTVar canonPath (depth + 1)
+                            return $ scanDirectoryConcurrent opts caches visitedTVar internedCanonPath (depth + 1)
 
 -- | Get file information safely
 {-# SCC getFileInfoSafe #-}
-getFileInfoSafe :: MonadIO m => OsPath -> m (Maybe FileInfo)
-getFileInfoSafe filePath = do
+getFileInfoSafe :: MonadIO m => ScanCaches -> OsPath -> m (Maybe FileInfo)
+getFileInfoSafe caches filePath = do
     -- Convert to FilePath for file operations in filepath 1.4
     filePathStr <- liftIO $ {-# SCC decodeFS_filePath #-} decodeFS filePath
     result <- liftIO $ try ({-# SCC getFileSize #-} getFileSize filePathStr)
@@ -282,9 +300,11 @@ getFileInfoSafe filePath = do
             logDebug $ "Cannot get size of file " ++ filePathStr ++ ": " ++ show (ex :: IOException)
             return Nothing
         Right size -> do
-            -- filePathText <- liftIO $ T.pack <$> decodeFS filePath
+            -- Intern the path components
+            let components = splitPath filePath
+            internedComponents <- liftIO $ OIC.internComponents (internCache caches) components
             logDebug $ "File: " ++ filePathStr ++ " -> " ++ show size ++ " bytes"
-            return $ Just $ FileInfo (splitPath filePath) size
+            return $ Just $ FileInfo internedComponents size
 
 -- | Get file sizes as a stream
 getFileSizesStream :: MonadIO m => ScanOptions -> ScanCaches -> OsPath -> Stream m Integer
