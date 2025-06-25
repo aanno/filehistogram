@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module FileScanner 
     ( ScanOptions(..)
@@ -10,9 +11,11 @@ module FileScanner
     , getFileSizes
     , getFileSizesStream
     , FileInfo(..)
+    , osPathsToTextSafe
+    , osPathToTextSafe
     ) where
 
-import Control.Exception (try, IOException)
+import Control.Exception (try, IOException, SomeException (SomeException))
 import Control.Monad.IO.Class (liftIO, MonadIO)
 import Control.Monad (when)
 import Control.Concurrent.STM
@@ -33,6 +36,7 @@ import qualified MountBoundary as MB
 import qualified CannonizedDirectoryCache as CDC
 import CannonizedDirectoryCache (cacheStats)
 import qualified VisitedPathTrie as VPT
+import Data.Either (fromRight)
 
 -- | Configuration for file scanning
 data ScanOptions = ScanOptions
@@ -77,7 +81,7 @@ logScanCachesInfo caches = do
 
 -- | Information about a scanned file
 data FileInfo = FileInfo
-    { filePath :: Text
+    { filePath :: [OsPath]
     , fileSize :: Integer
     } deriving (Show, Eq)
 
@@ -92,19 +96,37 @@ logVisitedTrieStats visitedTVar = do
             ++ ", Complete: " ++ show complete
             ++ ", Size: " ++ show (VPT.size trie)
 
+osPathToTextSafe :: OsPath -> IO Text
+osPathToTextSafe osPath = do
+  result <- try (decodeFS osPath)
+  case result of
+    Left (_ :: SomeException) -> return (T.pack "<invalid path>")
+    Right filePath -> return (T.pack filePath)
+
+osPathsToTextSafe :: [OsPath] -> IO Text
+osPathsToTextSafe osPaths = do
+  textParts <- mapM convertOne osPaths
+  return (T.concat textParts)
+  where
+    convertOne :: OsPath -> IO Text
+    convertOne osPath = do
+      result <- try (decodeFS osPath)
+      case result of
+        Left (_ :: SomeException) -> return (T.pack "<invalid>")
+        Right filePath -> return (T.pack filePath)
+
 -- | Scan files and return a stream of file information
 {-# SCC scanFilesStream #-}
 scanFilesStream :: MonadIO m => ScanOptions -> ScanCaches -> OsPath -> Stream m FileInfo
 scanFilesStream opts caches path = 
     S.concatEffect $ do
-        pathStr <- liftIO $ decodeFS path
-        logInfo $ "Starting streaming file scan of: " ++ pathStr
+        logInfo $ "Starting streaming file scan of: " ++ show path
         
         -- Canonicalize the path using cache
         canonResult <- liftIO $ try (CDC.getCanonicalized (canonCache caches) path)
         case canonResult of
             Left ex -> do
-                logError $ "Cannot canonicalize path " ++ pathStr ++ ": " ++ show (ex :: IOException)
+                logError $ "Cannot canonicalize path " ++ show path ++ ": " ++ show (ex :: IOException)
                 return S.nil
             Right canonPath -> do
                 canonPathStr <- liftIO $ decodeFS canonPath
@@ -219,8 +241,7 @@ processSubdirectory opts caches visitedTVar parentPath depth fullPath = do
     canonResult <- liftIO $ try (CDC.getCanonicalized (canonCache caches) fullPath)
     case canonResult of
         Left ex -> do
-            fullPathStr <- liftIO $ decodeFS fullPath
-            logWarn $ "Cannot canonicalize directory " ++ fullPathStr ++ ": " ++ show (ex :: IOException)
+            logWarn $ "Cannot canonicalize directory " ++ show fullPath ++ ": " ++ show (ex :: IOException)
             return S.nil
         Right canonPath -> do
             let canonComponents = splitPath canonPath
@@ -235,8 +256,7 @@ processSubdirectory opts caches visitedTVar parentPath depth fullPath = do
             
             if not shouldCross
                 then do
-                    canonPathStr <- liftIO $ decodeFS canonPath
-                    logInfo $ "Skipping filesystem boundary: " ++ canonPathStr
+                    logInfo $ "Skipping filesystem boundary: " ++ show canonPath
                     return S.nil
                 else do
                     -- Check if already visited using the trie (thread-safe)
@@ -244,8 +264,7 @@ processSubdirectory opts caches visitedTVar parentPath depth fullPath = do
                     
                     if alreadyVisited
                         then do
-                            canonPathStr <- liftIO $ decodeFS canonPath
-                            logDebug $ "Already visited (or has visited prefix), skipping: " ++ canonPathStr
+                            logDebug $ "Already visited (or has visited prefix), skipping: " ++ show canonPath
                             return S.nil
                         else
                             -- Recursively scan the subdirectory
@@ -263,9 +282,9 @@ getFileInfoSafe filePath = do
             logDebug $ "Cannot get size of file " ++ filePathStr ++ ": " ++ show (ex :: IOException)
             return Nothing
         Right size -> do
-            filePathText <- liftIO $ T.pack <$> decodeFS filePath
+            -- filePathText <- liftIO $ T.pack <$> decodeFS filePath
             logDebug $ "File: " ++ filePathStr ++ " -> " ++ show size ++ " bytes"
-            return $ Just $ FileInfo filePathText size
+            return $ Just $ FileInfo (splitPath filePath) size
 
 -- | Get file sizes as a stream
 getFileSizesStream :: MonadIO m => ScanOptions -> ScanCaches -> OsPath -> Stream m Integer

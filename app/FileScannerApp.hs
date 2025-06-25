@@ -23,7 +23,8 @@ printFileInfo :: FileInfo -> IO ()
 printFileInfo fileInfo = do
     let path = filePath fileInfo
         size = fileSize fileInfo
-    T.putStrLn $ T.concat [path, " (", T.pack (show size), " bytes)"]
+    pathText <- osPathsToTextSafe path
+    T.putStrLn $ T.concat [pathText, " (", T.pack (show size), " bytes)"]
 
 -- | Print cache statistics
 printCacheStats :: ScanCaches -> IO ()
