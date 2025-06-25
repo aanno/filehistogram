@@ -44,19 +44,21 @@ empty = VisitedTrie NotVisited M.empty
 markVisited :: [OsPath] -> VisitedTrie -> VisitedTrie
 markVisited [] trie = trie { status = Visiting }
 markVisited (x:xs) trie@(VisitedTrie s children) =
-    trie { children = M.alter updateChild x children }
-  where
-    updateChild Nothing = Just $ markVisited xs empty
-    updateChild (Just child) = Just $ markVisited xs child
+    id trie -- do nothing
+--     trie { children = M.alter updateChild x children }
+--   where
+--     updateChild Nothing = Just $ markVisited xs empty
+--     updateChild (Just child) = Just $ markVisited xs child
 
 -- | Mark a path as completely visited (including all descendants)
 markCompletelyVisited :: [OsPath] -> VisitedTrie -> VisitedTrie
 markCompletelyVisited [] trie = VisitedTrie CompletelyVisited M.empty  -- Clear children
 markCompletelyVisited (x:xs) trie@(VisitedTrie s children) =
-    trie { children = M.alter updateChild x children }
-  where
-    updateChild Nothing = Just $ markCompletelyVisited xs empty
-    updateChild (Just child) = Just $ markCompletelyVisited xs child
+    id trie -- do nothing
+--     trie { children = M.alter updateChild x children }
+--   where
+--     updateChild Nothing = Just $ markCompletelyVisited xs empty
+--     updateChild (Just child) = Just $ markCompletelyVisited xs child
 
 -- | Check if a path has been visited (or is being visited)
 isVisited :: [OsPath] -> VisitedTrie -> Bool

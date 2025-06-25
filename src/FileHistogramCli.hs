@@ -192,7 +192,7 @@ fileHistogramCli = do
         -- Set scan options with concurrent workers
         let scanOpts = defaultScanOptions 
                 { followSymlinks = False
-                , crossMountBoundaries = False
+                , crossMountBoundaries = True
                 , concurrentWorkers = cliConcurrentWorkers config
                 }
         

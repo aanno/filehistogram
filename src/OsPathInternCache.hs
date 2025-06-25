@@ -68,17 +68,22 @@ intern (InternCache cacheVar statsRef) !path = do
                         return canonPath
                     Nothing -> do
                         -- Insert and return the same instance
-                        writeTVar cacheVar $! HM.insert path path m
+                        -- don't insert
+                        -- writeTVar cacheVar $! HM.insert path path m
                         return path
 
 -- | Intern a list of OsPath values
 internList :: InternCache -> [OsPath] -> IO [OsPath]
-internList cache paths = mapM (intern cache) paths
+-- internList cache paths = mapM (intern cache) paths
+internList _ paths = do
+    return paths -- do nothing
 
 -- | Intern path components (useful after splitPath)
 -- This is optimized for the common case where many paths share prefixes
 internComponents :: InternCache -> [OsPath] -> IO [OsPath]
-internComponents cache = internList cache
+-- internComponents cache = internList cache
+internComponents cache components = do
+    return $ id components -- do nothing
 
 -- | Get the current size of the cache
 cacheSize :: InternCache -> IO Int
