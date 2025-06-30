@@ -25,7 +25,9 @@
     "customizations": {
         "vscode": {
             "extensions": [
-
+                "mogeko.haskell-extension-pack",
+                "jcanero.hoogle-vscode",
+                "phoityne.phoityne-vscode"
             ]
         }
     }
