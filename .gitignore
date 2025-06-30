@@ -3,3 +3,5 @@
 *~
 /*.html
 /haskell
+/dist-newstyle
+/.devcontainer/pre-devcontainer.env
