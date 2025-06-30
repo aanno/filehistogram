@@ -1,0 +1,40 @@
+{
+    "$schema": "https://raw.githubusercontent.com/devcontainers/spec/main/schemas/devContainer.schema.json",
+    "name": "filehistogram.ghc",
+    "image": "localhost/ghc",
+    "runArgs": [
+        "--userns=keep-id:uid=${localEnv:$USERID},gid=${localEnv:$USERID}",
+
+    ],
+    "mounts": [
+        "source=${localEnv:$LINUX_CONFIG}/build-with-docker/var/lib/apt,target=/var/lib/apt,type=bind,z,consistency=cached",
+        "source=${localEnv:$LINUX_CONFIG}/build-with-docker/var/cache/apt,target=/var/cache/apt,type=bind,z,consistency=cached",
+        "source=${localEnv:$LINUX_CONFIG}/build-with-docker/var/lib/dnf,target=/var/lib/dnf,type=bind,z,consistency=cached",
+        "source=${localEnv:$LINUX_CONFIG}/build-with-docker/var/cache/dnf,target=/var/cache/dnf,type=bind,z,consistency=cached",
+        "source=${localEnv:$LINUX_CONFIG}/build-with-docker/.cargo,target=${localEnv:$HOME}/.cargo,type=bind,z,consistency=cached",
+        "source=${localEnv:$LINUX_CONFIG}/build-with-docker/.rustup,target=${localEnv:$HOME}/.rustup,type=bind,z,consistency=cached",
+        "source=${localEnv:$LINUX_CONFIG}/build-with-docker/.ghcup,target=${localEnv:$HOME}/.ghcup,type=bind,z,consistency=cached",
+        "source=${localEnv:$LINUX_CONFIG}/build-with-docker/.stack,target=${localEnv:$HOME}/.stack,type=bind,z,consistency=cached",
+        "source=${localEnv:$LINUX_CONFIG}/build-with-docker/.cabal,target=${localEnv:$HOME}/.cabal,type=bind,z,consistency=cached",
+        "source=${localEnv:$LINUX_CONFIG}/dev-in-container/config.yaml,target=${localEnv:$HOME}/.stack/config.yaml,type=bind,z,consistency=cached",
+        "source=${localEnv:$LINUX_CONFIG}/dev-in-container/cabal/config,target=${localEnv:$HOME}/.cabal/config,type=bind,z,consistency=cached",
+        "source=${localEnv:$LINUX_CONFIG}/dev-in-container/ghcup/env,target=${localEnv:$HOME}/.ghcup/env,type=bind,z,consistency=cached"
+    ],
+    "workspaceFolder": "${localEnv:$FILEHISTOGRAM}",
+    "workspaceMount": "source=${localEnv:$FILEHISTOGRAM},target=/workspaces/ghc,type=bind,consistency=cached",
+    "remoteUser": "vscode",
+    "containerEnv": {
+        "USERID": "1001",
+        "HOME": "/home/vscode",
+        "LINUX_CONFIG": "/var/home/tpasch/scm/linux-config",
+        "FILEHISTOGRAM": "/var/home/tpasch/scm/filehistogram"
+    },
+    "containerUser": "vscode",
+    "customizations": {
+        "vscode": {
+            "extensions": [
+
+            ]
+        }
+    }
+}
