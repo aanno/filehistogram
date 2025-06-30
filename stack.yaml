@@ -50,6 +50,7 @@ packages:
 
 extra-deps:
 - streamly-0.10.1@sha256:c0cdf0c1e57d8011bd585a0e571b3f92fb10f31458cdc8d466128c24b18af74a,20978
+- haskell-dap-0.0.16.0@sha256:5ee4fba7ce1b8220f486a5251a941e6cd739ab2330e8f25efc5af553a4e1c61d,944
 
 # # for System.OsPath, System.MountPoints
 # - filepath-1.5.4.0@sha256:099c33e0e570dad93390e1c01c1f4bc6e4f13587de8e199df3c94a6cb62c7434,4945

@@ -11,6 +11,13 @@ packages:
       size: 22901
   original:
     hackage: streamly-0.10.1@sha256:c0cdf0c1e57d8011bd585a0e571b3f92fb10f31458cdc8d466128c24b18af74a,20978
+- completed:
+    hackage: haskell-dap-0.0.16.0@sha256:5ee4fba7ce1b8220f486a5251a941e6cd739ab2330e8f25efc5af553a4e1c61d,944
+    pantry-tree:
+      sha256: a757fbe6b8d1ca75a46cc9546d5bfaa903531f312e4266b7b24c62427a792c21
+      size: 315
+  original:
+    hackage: haskell-dap-0.0.16.0@sha256:5ee4fba7ce1b8220f486a5251a941e6cd739ab2330e8f25efc5af553a4e1c61d,944
 snapshots:
 - completed:
     sha256: a3501d1b61a539371d85305fe73e1134fc08e7c97498a42952455f011fd97ecf

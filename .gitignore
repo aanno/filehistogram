@@ -5,3 +5,11 @@
 /haskell
 /dist-newstyle
 /.devcontainer/pre-devcontainer.env
+/filehistogram-exe.*
+/*.hp
+/*.ps
+/*.log
+/log
+cache/
+/.vscode/phoityne.log
+/tmp
