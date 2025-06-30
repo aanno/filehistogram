@@ -3,24 +3,24 @@
     "name": "filehistogram.ghc",
     "image": "localhost/ghc",
     "runArgs": [
-        "--userns=keep-id:uid=1000,gid=1000"
+        "--userns=keep-id:uid=${localEnv:CONTAINER_USERID},gid=${localEnv:CONTAINER_USERID}"
     ],
     "mounts": [
-        "source=/stratis/home/tpasch/dev/scm/aanno/github/linux-config/build-with-docker/var/lib/apt,target=/var/lib/apt,type=bind,z,consistency=cached",
-        "source=/stratis/home/tpasch/dev/scm/aanno/github/linux-config/build-with-docker/var/cache/apt,target=/var/cache/apt,type=bind,z,consistency=cached",
-        "source=/stratis/home/tpasch/dev/scm/aanno/github/linux-config/build-with-docker/var/lib/dnf,target=/var/lib/dnf,type=bind,z,consistency=cached",
-        "source=/stratis/home/tpasch/dev/scm/aanno/github/linux-config/build-with-docker/var/cache/dnf,target=/var/cache/dnf,type=bind,z,consistency=cached",
-        "source=/stratis/home/tpasch/dev/scm/aanno/github/linux-config/build-with-docker/.cargo,target=/home/vscode/.cargo,type=bind,z,consistency=cached",
-        "source=/stratis/home/tpasch/dev/scm/aanno/github/linux-config/build-with-docker/.rustup,target=/home/vscode/.rustup,type=bind,z,consistency=cached",
-        "source=/stratis/home/tpasch/dev/.ghcup,target=/home/vscode/.ghcup,type=bind,z,consistency=cached",
-        "source=/stratis/home/tpasch/dev/.stack,target=/home/vscode/.stack,type=bind,z,consistency=cached",
-        "source=/stratis/home/tpasch/dev/.cabal,target=/home/vscode/.cabal,type=bind,z,consistency=cached",
-        "source=/stratis/home/tpasch/dev/scm/aanno/github/linux-config/dev-in-container/haskell/config.yaml,target=/home/vscode/.stack/config.yaml,type=bind,z,consistency=cached",
-        "source=/stratis/home/tpasch/dev/scm/aanno/github/linux-config/dev-in-container/haskell/cabal/config,target=/home/vscode/.cabal/config,type=bind,z,consistency=cached",
-        "source=/stratis/home/tpasch/dev/scm/aanno/github/linux-config/dev-in-container/haskell/ghcup/env,target=/home/vscode/.ghcup/env,type=bind,z,consistency=cached"
+        "source=${localEnv:LINUX_CONFIG}/build-with-docker/var/lib/apt,target=/var/lib/apt,type=bind,z,consistency=cached",
+        "source=${localEnv:LINUX_CONFIG}/build-with-docker/var/cache/apt,target=/var/cache/apt,type=bind,z,consistency=cached",
+        "source=${localEnv:LINUX_CONFIG}/build-with-docker/var/lib/dnf,target=/var/lib/dnf,type=bind,z,consistency=cached",
+        "source=${localEnv:LINUX_CONFIG}/build-with-docker/var/cache/dnf,target=/var/cache/dnf,type=bind,z,consistency=cached",
+        "source=${localEnv:LINUX_CONFIG}/build-with-docker/.cargo,target=/home/vscode/.cargo,type=bind,z,consistency=cached",
+        "source=${localEnv:LINUX_CONFIG}/build-with-docker/.rustup,target=/home/vscode/.rustup,type=bind,z,consistency=cached",
+        "source=${localEnv:GHCHOME}/.ghcup,target=/home/vscode/.ghcup,type=bind,z,consistency=cached",
+        "source=${localEnv:GHCHOME}/.stack,target=/home/vscode/.stack,type=bind,z,consistency=cached",
+        "source=${localEnv:GHCHOME}/.cabal,target=/home/vscode/.cabal,type=bind,z,consistency=cached",
+        "source=${localEnv:LINUX_CONFIG}/dev-in-container/haskell/config.yaml,target=/home/vscode/.stack/config.yaml,type=bind,z,consistency=cached",
+        "source=${localEnv:LINUX_CONFIG}/dev-in-container/haskell/cabal/config,target=/home/vscode/.cabal/config,type=bind,z,consistency=cached",
+        "source=${localEnv:LINUX_CONFIG}/dev-in-container/haskell/ghcup/env,target=/home/vscode/.ghcup/env,type=bind,z,consistency=cached"
     ],
     "workspaceFolder": "/workspaces/ghc",
-    "workspaceMount": "source=.,target=/workspaces/ghc,type=bind,z,consistency=cached",
+    "workspaceMount": "source=${localEnv:WORKSPACE_FOLDER},target=/workspaces/ghc,type=bind,z,consistency=cached",
     "remoteUser": "vscode",
     "customizations": {
         "vscode": {
