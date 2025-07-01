@@ -5,6 +5,16 @@
 * [Haskell Weekly](https://haskellweekly.news/)
   A weekly newsletter about Haskell.
 * https://well-typed.com/blog/
+* [unfolder](https://github.com/well-typed/unfolder)
+  code to the youtube channel
+
+## Books
+
+* [Real World Haskell](https://book.realworldhaskell.org/)
+
+## Code
+
+* https://github.com/well-typed
 
 ## Fun
 
